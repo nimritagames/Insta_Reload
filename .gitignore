@@ -97,3 +97,8 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# Claude Code / AI Assistant files - DO NOT COMMIT
+.claude/
+CLAUDE.md
+AGENTS.md
