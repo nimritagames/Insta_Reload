@@ -153,6 +153,9 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         private static double _lastChangeTime;
         private static readonly double _debounceDelay = 0.3; // 300ms debounce
 
+        // Patcher registry - manages IL patchers for each assembly
+        private static readonly Dictionary<string, InstaReloadPatcher> _patchers = new Dictionary<string, InstaReloadPatcher>();
+
         static FileChangeDetector()
         {
             Initialize();
@@ -398,29 +401,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 var tempPath = Path.Combine(Path.GetTempPath(), $"{assemblyName}_{Guid.NewGuid()}.dll");
                 File.WriteAllBytes(tempPath, assemblyBytes);
 
-                // Get the InstaReloadManager's Patchers dictionary
-                var managerType = typeof(InstaReloadManager);
-                var patchersField = managerType.GetField("Patchers",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-
-                if (patchersField == null)
-                {
-                    InstaReloadLogger.LogError("[FileDetector] Could not access Patchers from InstaReloadManager!");
-                    return;
-                }
-
-                var patchers = patchersField.GetValue(null) as System.Collections.Generic.Dictionary<string, InstaReloadPatcher>;
-                if (patchers == null)
-                {
-                    InstaReloadLogger.LogError("[FileDetector] Patchers dictionary is null!");
-                    return;
-                }
-
                 // Get or create patcher for this assembly
-                if (!patchers.TryGetValue(assemblyName, out var patcher))
+                if (!_patchers.TryGetValue(assemblyName, out var patcher))
                 {
                     patcher = new InstaReloadPatcher(assemblyName);
-                    patchers[assemblyName] = patcher;
+                    _patchers[assemblyName] = patcher;
                 }
 
                 // Apply the hot reload patches
