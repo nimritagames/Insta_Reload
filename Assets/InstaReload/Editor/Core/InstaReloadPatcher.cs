@@ -212,6 +212,18 @@ namespace Nimrita.InstaReload.Editor
                     return;
                 }
 
+                // THE MAGIC: Load compiled assembly so new methods exist at runtime
+                try
+                {
+                    var assemblyBytes = System.IO.File.ReadAllBytes(assemblyPath);
+                    System.Reflection.Assembly.Load(assemblyBytes);
+                    InstaReloadLogger.Log($"[Patcher] ✓ Compiled assembly loaded - new methods now callable");
+                }
+                catch (Exception ex)
+                {
+                    InstaReloadLogger.LogWarning($"Failed to load compiled assembly: {ex.Message}");
+                }
+
                 ModuleDefinition updatedModule = null;
                 try
                 {
@@ -307,14 +319,14 @@ namespace Nimrita.InstaReload.Editor
                         // Report new methods
                         if (newMethods > 0)
                         {
-                            InstaReloadLogger.LogWarning($"⚠ {newMethods} new method(s) added - they won't be callable until Play Mode restart");
+                            InstaReloadLogger.Log($"✓ {newMethods} new method(s) added and loaded!");
                             foreach (var name in newMethodNames.Take(3))
                             {
-                                InstaReloadLogger.LogWarning($"  → {name}");
+                                InstaReloadLogger.Log($"  → {name}");
                             }
                             if (newMethodNames.Count > 3)
                             {
-                                InstaReloadLogger.LogWarning($"  ... and {newMethodNames.Count - 3} more");
+                                InstaReloadLogger.Log($"  ... and {newMethodNames.Count - 3} more");
                             }
                         }
 
