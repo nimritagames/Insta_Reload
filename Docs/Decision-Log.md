@@ -31,14 +31,38 @@ professional without slowing iteration. Keep entries short and actionable.
   Outcome: Replaced entrypoint trampolines with Hook-based detours to a dynamic method.
   Follow-ups: Confirm dispatcher invocation on Update/Start during Play Mode and review detour stability.
 - 2025-12-30:
-  Decision: Add log levels and log categories with per-category toggles.
+  Decision: Add log levels and log categories with per-category toggles.        
   Context: Dispatcher diagnostics and editor logs needed to be configurable without code changes.
   Options considered: Keep a single verbose toggle; hard-code categories in strings.
   Outcome: Introduced log level/category enums, settings UI for toggles, and dispatcher logging configuration.
-  Follow-ups: Review category coverage and adjust defaults based on usage.
+  Follow-ups: Review category coverage and adjust defaults based on usage.      
+- 2025-12-30:
+  Decision: Add a HotReloadBehaviour base class to predeclare Unity lifecycle entry points.
+  Context: Unity only wires message methods at domain load, so entry points added mid-play are never called.
+  Options considered: Manual stubs in every script; codegen to inject message stubs; base class with dispatcher forwarding.
+  Outcome: Added HotReloadBehaviour in runtime and suppressed missing-entrypoint warnings for inheritors.
+  Follow-ups: Expand the base entrypoint list or generate it from a curated Unity message table.
+- 2025-12-30:
+  Decision: Add a fallback entry point manager for MonoBehaviour scripts without inheritance.
+  Context: Users wanted Update to work when added mid-play without requiring a base class.
+  Options considered: IL weaving into compiled assemblies; global update driver; per-instance proxy components.
+  Outcome: Added a runtime entry point manager that attaches proxy components and dispatches Update/FixedUpdate/LateUpdate.
+  Follow-ups: Expand coverage (or keep limited) and watch proxy scan cost in larger scenes.
+- 2025-12-31:
+  Decision: Expand fallback entry point coverage to most Unity message methods.
+  Context: MonoBehaviour users wanted new Unity messages (not just Update) to work when added mid-play.
+  Options considered: Keep Update-only fallback; require HotReloadBehaviour; implement IL weaving.
+  Outcome: Added a wider EntryPointKind set, signature matching in the patcher, and proxy dispatch for lifecycle, rendering, physics, UI, and particle callbacks.
+  Follow-ups: Monitor proxy scan overhead and consider opt-out or scoped registration if needed.
+- 2025-12-31:
+  Decision: Exclude initialization/destruction messages from fallback dispatch.
+  Context: `Awake`, `Start`, `OnEnable`, `OnDisable`, and `OnDestroy` have one-time or stateful semantics and are unsafe to auto-replay via a proxy.
+  Options considered: Keep them in fallback; add an opt-in attribute; remove from fallback by default.
+  Outcome: Removed these methods from the fallback map and proxy dispatch path.
+  Follow-ups: Consider an explicit opt-in replay mechanism if needed later.
 - 2025-__-__:
   Decision:
-  Context: 
+  Context:
   Options considered: 
   Outcome: 
   Follow-ups: 

@@ -184,6 +184,7 @@ namespace Nimrita.InstaReload.Editor
                     }
 
                     HotReloadDispatcher.Clear();
+                    HotReloadEntryPointManager.Clear();
                 }
                 catch (System.Exception ex)
                 {

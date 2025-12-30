@@ -176,6 +176,7 @@ using Mono.Cecil.Rocks;
 using MonoMod.RuntimeDetour;
 using MonoMod.Utils;
 using Nimrita.InstaReload;
+using EntryPointKind = Nimrita.InstaReload.HotReloadEntryPointManager.EntryPointKind;
 using EmitDynamicMethod = System.Reflection.Emit.DynamicMethod;
 using EmitOpCodes = System.Reflection.Emit.OpCodes;
 using CecilExceptionHandler = Mono.Cecil.Cil.ExceptionHandler;
@@ -197,6 +198,82 @@ namespace Nimrita.InstaReload.Editor
             "OnDestroy"
         };
         private const string DispatcherBridgeTypeName = "Nimrita.InstaReload.HotReloadBridge";
+        private const string HotReloadBehaviourTypeName = "Nimrita.InstaReload.HotReloadBehaviour";
+        private static readonly EntryPointSignature[] FallbackEntryPoints =
+        {
+            new EntryPointSignature("Update", EntryPointKind.Update),
+            new EntryPointSignature("FixedUpdate", EntryPointKind.FixedUpdate),
+            new EntryPointSignature("LateUpdate", EntryPointKind.LateUpdate),
+            new EntryPointSignature("OnGUI", EntryPointKind.OnGUI),
+            new EntryPointSignature("OnApplicationFocus", EntryPointKind.OnApplicationFocus, "System.Boolean"),
+            new EntryPointSignature("OnApplicationPause", EntryPointKind.OnApplicationPause, "System.Boolean"),
+            new EntryPointSignature("OnApplicationQuit", EntryPointKind.OnApplicationQuit),
+            new EntryPointSignature("OnBecameVisible", EntryPointKind.OnBecameVisible),
+            new EntryPointSignature("OnBecameInvisible", EntryPointKind.OnBecameInvisible),
+            new EntryPointSignature("OnPreCull", EntryPointKind.OnPreCull),
+            new EntryPointSignature("OnPreRender", EntryPointKind.OnPreRender),
+            new EntryPointSignature("OnPostRender", EntryPointKind.OnPostRender),
+            new EntryPointSignature("OnRenderObject", EntryPointKind.OnRenderObject),
+            new EntryPointSignature("OnWillRenderObject", EntryPointKind.OnWillRenderObject),
+            new EntryPointSignature("OnRenderImage", EntryPointKind.OnRenderImage, "UnityEngine.RenderTexture", "UnityEngine.RenderTexture"),
+            new EntryPointSignature("OnDrawGizmos", EntryPointKind.OnDrawGizmos),
+            new EntryPointSignature("OnDrawGizmosSelected", EntryPointKind.OnDrawGizmosSelected),
+            new EntryPointSignature("Reset", EntryPointKind.Reset),
+            new EntryPointSignature("OnValidate", EntryPointKind.OnValidate),
+            new EntryPointSignature("OnAnimatorMove", EntryPointKind.OnAnimatorMove),
+            new EntryPointSignature("OnAnimatorIK", EntryPointKind.OnAnimatorIK, "System.Int32"),
+            new EntryPointSignature("OnTransformChildrenChanged", EntryPointKind.OnTransformChildrenChanged),
+            new EntryPointSignature("OnTransformParentChanged", EntryPointKind.OnTransformParentChanged),
+            new EntryPointSignature("OnRectTransformDimensionsChange", EntryPointKind.OnRectTransformDimensionsChange),
+            new EntryPointSignature("OnCanvasGroupChanged", EntryPointKind.OnCanvasGroupChanged),
+            new EntryPointSignature("OnCanvasHierarchyChanged", EntryPointKind.OnCanvasHierarchyChanged),
+            new EntryPointSignature("OnDidApplyAnimationProperties", EntryPointKind.OnDidApplyAnimationProperties),
+            new EntryPointSignature("OnCollisionEnter", EntryPointKind.OnCollisionEnter, "UnityEngine.Collision"),
+            new EntryPointSignature("OnCollisionExit", EntryPointKind.OnCollisionExit, "UnityEngine.Collision"),
+            new EntryPointSignature("OnCollisionStay", EntryPointKind.OnCollisionStay, "UnityEngine.Collision"),
+            new EntryPointSignature("OnCollisionEnter2D", EntryPointKind.OnCollisionEnter2D, "UnityEngine.Collision2D"),
+            new EntryPointSignature("OnCollisionExit2D", EntryPointKind.OnCollisionExit2D, "UnityEngine.Collision2D"),
+            new EntryPointSignature("OnCollisionStay2D", EntryPointKind.OnCollisionStay2D, "UnityEngine.Collision2D"),
+            new EntryPointSignature("OnTriggerEnter", EntryPointKind.OnTriggerEnter, "UnityEngine.Collider"),
+            new EntryPointSignature("OnTriggerExit", EntryPointKind.OnTriggerExit, "UnityEngine.Collider"),
+            new EntryPointSignature("OnTriggerStay", EntryPointKind.OnTriggerStay, "UnityEngine.Collider"),
+            new EntryPointSignature("OnTriggerEnter2D", EntryPointKind.OnTriggerEnter2D, "UnityEngine.Collider2D"),
+            new EntryPointSignature("OnTriggerExit2D", EntryPointKind.OnTriggerExit2D, "UnityEngine.Collider2D"),
+            new EntryPointSignature("OnTriggerStay2D", EntryPointKind.OnTriggerStay2D, "UnityEngine.Collider2D"),
+            new EntryPointSignature("OnControllerColliderHit", EntryPointKind.OnControllerColliderHit, "UnityEngine.ControllerColliderHit"),
+            new EntryPointSignature("OnJointBreak", EntryPointKind.OnJointBreak, "System.Single"),
+            new EntryPointSignature("OnJointBreak2D", EntryPointKind.OnJointBreak2D, "UnityEngine.Joint2D"),
+            new EntryPointSignature("OnParticleCollision", EntryPointKind.OnParticleCollision, "UnityEngine.GameObject"),
+            new EntryPointSignature("OnParticleTrigger", EntryPointKind.OnParticleTrigger),
+            new EntryPointSignature("OnParticleSystemStopped", EntryPointKind.OnParticleSystemStopped),
+            new EntryPointSignature("OnParticleSystemPaused", EntryPointKind.OnParticleSystemPaused),
+            new EntryPointSignature("OnParticleSystemResumed", EntryPointKind.OnParticleSystemResumed),
+            new EntryPointSignature("OnParticleSystemPlaybackStateChanged", EntryPointKind.OnParticleSystemPlaybackStateChanged),
+            new EntryPointSignature("OnMouseDown", EntryPointKind.OnMouseDown),
+            new EntryPointSignature("OnMouseUp", EntryPointKind.OnMouseUp),
+            new EntryPointSignature("OnMouseEnter", EntryPointKind.OnMouseEnter),
+            new EntryPointSignature("OnMouseExit", EntryPointKind.OnMouseExit),
+            new EntryPointSignature("OnMouseOver", EntryPointKind.OnMouseOver),
+            new EntryPointSignature("OnMouseDrag", EntryPointKind.OnMouseDrag),
+            new EntryPointSignature("OnMouseUpAsButton", EntryPointKind.OnMouseUpAsButton),
+            new EntryPointSignature("OnBeforeRender", EntryPointKind.OnBeforeRender)
+        };
+        private static readonly Dictionary<string, EntryPointSignature[]> FallbackEntryPointsByName =
+            BuildFallbackEntryPointMap();
+
+        private readonly struct EntryPointSignature
+        {
+            public EntryPointSignature(string name, EntryPointKind kind, params string[] parameterTypes)
+            {
+                Name = name;
+                Kind = kind;
+                ParameterTypes = parameterTypes ?? Array.Empty<string>();
+            }
+
+            public string Name { get; }
+            public EntryPointKind Kind { get; }
+            public string[] ParameterTypes { get; }
+        }
 
         private sealed class TrampolineHook
         {
@@ -356,7 +433,19 @@ namespace Nimrita.InstaReload.Editor
                                         }
                                         else
                                         {
-                                            missingEntryPoints.Add(methodName);
+                                            if (InheritsHotReloadBehaviour(method.DeclaringType))
+                                            {
+                                                InstaReloadLogger.LogVerbose($"[Patcher] Entry point {methodName} dispatched via HotReloadBehaviour");
+                                            }
+                                            else if (TryGetFallbackEntryPointKind(method, out var entryPointKind) &&
+                                                     TryRegisterMissingEntryPoint(method, runtimeAssembly, entryPointKind, methodId))
+                                            {
+                                                InstaReloadLogger.LogVerbose($"[Patcher] Unity message {methodName} dispatched via fallback proxy");
+                                            }
+                                            else
+                                            {
+                                                missingEntryPoints.Add(methodName);
+                                            }
                                         }
                                     }
                                     else
@@ -409,6 +498,19 @@ namespace Nimrita.InstaReload.Editor
 
                             try
                             {
+                                if (methodIds.TryGetValue(key, out var methodId) &&
+                                    TryGetFallbackEntryPointKind(method, out var entryPointKind))
+                                {
+                                    if (TryRegisterMissingEntryPoint(method, runtimeAssembly, entryPointKind, methodId))
+                                    {
+                                        InstaReloadLogger.LogVerbose($"[Patcher] Unity message {methodName} dispatched via fallback proxy");
+                                    }
+                                    else
+                                    {
+                                        missingEntryPoints.Add(methodName);
+                                    }
+                                }
+
                                 if (TryRegisterDispatcher(method, runtimeAssembly, runtimeMethods, runtimeFields, methodIds, dispatchKeys, dispatcherInvokeMethod, out var error))
                                 {
                                     newMethods++;
@@ -446,7 +548,7 @@ namespace Nimrita.InstaReload.Editor
 
                         if (missingEntryPoints.Count > 0)
                         {
-                            InstaReloadLogger.LogWarning($"[Patcher] {missingEntryPoints.Count} Unity entry point(s) missing at runtime (added during Play Mode):");
+                            InstaReloadLogger.LogWarning($"[Patcher] {missingEntryPoints.Count} Unity message method(s) missing at runtime (added during Play Mode):");
                             foreach (var name in missingEntryPoints.Take(3))
                             {
                                 InstaReloadLogger.LogWarning($"  -> {name}");
@@ -846,6 +948,79 @@ namespace Nimrita.InstaReload.Editor
             return keys;
         }
 
+        private static Dictionary<string, EntryPointSignature[]> BuildFallbackEntryPointMap()
+        {
+            return FallbackEntryPoints
+                .GroupBy(entry => entry.Name, StringComparer.Ordinal)
+                .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        }
+
+        private static bool TryGetFallbackEntryPointKind(MethodDefinition method, out EntryPointKind kind)
+        {
+            kind = default;
+
+            if (method == null)
+            {
+                return false;
+            }
+
+            if (method.IsStatic)
+            {
+                return false;
+            }
+
+            if (method.ReturnType.MetadataType != MetadataType.Void)
+            {
+                return false;
+            }
+
+            if (method.HasGenericParameters || method.DeclaringType.HasGenericParameters)
+            {
+                return false;
+            }
+
+            if (!FallbackEntryPointsByName.TryGetValue(method.Name, out var signatures))
+            {
+                return false;
+            }
+
+            var parameterCount = method.Parameters.Count;
+            for (int i = 0; i < signatures.Length; i++)
+            {
+                var signature = signatures[i];
+                if (signature.ParameterTypes.Length != parameterCount)
+                {
+                    continue;
+                }
+
+                bool matches = true;
+                for (int p = 0; p < parameterCount; p++)
+                {
+                    var parameterType = method.Parameters[p].ParameterType;
+                    if (parameterType is ByReferenceType || parameterType is PointerType)
+                    {
+                        matches = false;
+                        break;
+                    }
+
+                    var paramTypeName = NormalizeTypeName(GetTypeName(parameterType));
+                    if (!string.Equals(paramTypeName, signature.ParameterTypes[p], StringComparison.Ordinal))
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if (matches)
+                {
+                    kind = signature.Kind;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static bool IsUnityEntryPoint(MethodDefinition method)
         {
             if (!UnityEntryPointNames.Contains(method.Name))
@@ -864,6 +1039,56 @@ namespace Nimrita.InstaReload.Editor
             }
 
             return method.ReturnType.MetadataType == MetadataType.Void;
+        }
+
+        private static bool InheritsHotReloadBehaviour(TypeDefinition type)
+        {
+            var current = type;
+            while (current != null)
+            {
+                var baseType = current.BaseType;
+                if (baseType == null)
+                {
+                    return false;
+                }
+
+                var baseName = NormalizeTypeName(baseType.FullName);
+                if (string.Equals(baseName, HotReloadBehaviourTypeName, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                try
+                {
+                    current = baseType.Resolve();
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryRegisterMissingEntryPoint(
+            MethodDefinition method,
+            Assembly runtimeAssembly,
+            EntryPointKind entryPointKind,
+            int methodId)
+        {
+            if (method == null || runtimeAssembly == null)
+            {
+                return false;
+            }
+
+            var runtimeType = ResolveRuntimeType(method.DeclaringType, runtimeAssembly);
+            if (runtimeType == null)
+            {
+                return false;
+            }
+
+            return HotReloadEntryPointManager.TryRegisterMissingEntryPoint(runtimeType, entryPointKind, methodId);
         }
 
         private bool EnsureTrampoline(MethodBase runtimeMethod, string methodKey, MethodInfo dispatcherInvokeMethod, int methodId)
