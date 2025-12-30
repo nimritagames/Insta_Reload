@@ -1,3 +1,4 @@
+using Nimrita.InstaReload;
 using UnityEditor;
 using UnityEngine;
 
@@ -18,7 +19,7 @@ namespace Nimrita.InstaReload.Editor.UI
             settings.Enabled = true;
             EditorUtility.SetDirty(settings);
             AssetDatabase.SaveAssets();
-            Debug.Log("[InstaReload] Hot reload enabled");
+            InstaReloadLogger.Log(InstaReloadLogCategory.UI, "Hot reload enabled");
         }
 
         [MenuItem("InstaReload/Enable Hot Reload", true)]
@@ -35,7 +36,7 @@ namespace Nimrita.InstaReload.Editor.UI
             settings.Enabled = false;
             EditorUtility.SetDirty(settings);
             AssetDatabase.SaveAssets();
-            Debug.Log("[InstaReload] Hot reload disabled");
+            InstaReloadLogger.Log(InstaReloadLogCategory.UI, "Hot reload disabled");
         }
 
         [MenuItem("InstaReload/Disable Hot Reload", true)]

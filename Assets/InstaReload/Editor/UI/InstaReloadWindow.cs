@@ -1,3 +1,4 @@
+using Nimrita.InstaReload;
 using UnityEditor;
 using UnityEngine;
 
@@ -56,15 +57,30 @@ namespace Nimrita.InstaReload.Editor.UI
                 settings.Enabled
             );
 
-            settings.VerboseLogging = EditorGUILayout.Toggle(
-                new GUIContent("Verbose Logging", "Show detailed logs for debugging"),
-                settings.VerboseLogging
+            settings.EnabledLogLevels = (InstaReloadLogLevel)EditorGUILayout.EnumFlagsField(
+                new GUIContent("Log Levels", "Select which log levels are emitted"),
+                settings.EnabledLogLevels
             );
+
+            settings.EnabledLogCategories = (InstaReloadLogCategory)EditorGUILayout.EnumFlagsField(
+                new GUIContent("Log Categories", "Select which log categories are emitted"),
+                settings.EnabledLogCategories
+            );
+
+            EditorGUILayout.HelpBox(
+                "Toggle the Dispatcher category to show or hide runtime dispatch diagnostics.",
+                MessageType.None);
 
             if (EditorGUI.EndChangeCheck())
             {
                 EditorUtility.SetDirty(settings);
                 AssetDatabase.SaveAssets();
+                if (EditorApplication.isPlaying)
+                {
+                    HotReloadDispatcher.ConfigureLogging(
+                        settings.EnabledLogCategories,
+                        settings.EnabledLogLevels);
+                }
             }
 
             EditorGUILayout.Space(10);
