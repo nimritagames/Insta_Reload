@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Nimrita.InstaReload;
 using UnityEditor;
 using UnityEngine;
 
@@ -23,14 +24,27 @@ namespace Nimrita.InstaReload.Editor
                         serialized.FindProperty("enabled"),
                         new GUIContent("Enable InstaReload"));
                     EditorGUILayout.PropertyField(
-                        serialized.FindProperty("verboseLogging"),
-                        new GUIContent("Verbose Logging"));
+                        serialized.FindProperty("enabledLogLevels"),
+                        new GUIContent("Log Levels"));
+                    EditorGUILayout.PropertyField(
+                        serialized.FindProperty("enabledLogCategories"),
+                        new GUIContent("Log Categories"));
+
+                    EditorGUILayout.HelpBox(
+                        "Toggle the Dispatcher category to show or hide runtime dispatch diagnostics.",
+                        MessageType.None);
 
                     EditorGUILayout.HelpBox(
                         "InstaReload patches method bodies during Play Mode to avoid domain reloads. Structural changes still require a restart.",
                         MessageType.Info);
 
-                    serialized.ApplyModifiedProperties();
+                    var changed = serialized.ApplyModifiedProperties();
+                    if (changed && EditorApplication.isPlaying)
+                    {
+                        HotReloadDispatcher.ConfigureLogging(
+                            settings.EnabledLogCategories,
+                            settings.EnabledLogLevels);
+                    }
                 },
                 keywords = new HashSet<string>(new[] { "InstaReload", "Hot Reload", "Reload", "Patch" })
             };

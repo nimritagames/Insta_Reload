@@ -248,8 +248,8 @@ InstaReload:
 - ✅ Adding parameters
 - ✅ Changing return type
 
-### Not Supported (Requires Restart)
-- ❌ Adding new methods (no call sites exist)
+### Limitations (May Require Restart)
+- ⚠ Adding new methods (supported when called from dispatched Unity entry points)
 - ❌ Adding new fields (structure changed)
 - ❌ Adding new types (metadata changed)
 - ❌ Changing base class
@@ -352,20 +352,21 @@ void TakeDamage(float amount) { }  // Changed int → float
 ✓ NO domain reload
 ```
 
-### Test 3: New Method (Not Callable)
+### Test 3: New Method (Dispatcher Path)
 ```csharp
 // Before:
 public class Player { }
 
 // After (edit and save):
 public class Player {
-    void NewMethod() { }  // Added new method
+    void Update() { NewMethod(); }
+    void NewMethod() { }
 }
 
 // Expected:
-⚠ 1 new method(s) added - they won't be callable until Play Mode restart
+✓ New method registered for dispatcher
 ✓ Hot reload complete
-✓ NO domain reload (but method not callable)
+✓ Update calls NewMethod immediately (no restart)
 ```
 
 ---
@@ -384,10 +385,8 @@ A: We suppressed Unity DURING play mode. On exit, Unity catches up on pending ch
 ### Q: Can I hot reload in Edit Mode?
 A: Not currently. Edit Mode reload is more complex (Unity's inspector, scene state, etc.). May add in future.
 
-### Q: Why can't I add new methods?
-A: New methods have no call sites. Unity's compiled code was built before that method existed. Solutions:
-- Virtual Engine (dispatcher pattern)
-- Restart Play Mode
+### Q: How are new methods handled?
+A: Entry points now dispatch through HotReloadDispatcher, so new methods are callable when reached from dispatched Unity lifecycle methods. If a call site is not dispatched, you still need a Play Mode restart.
 
 ### Q: Does this work with IL2CPP?
 A: No. IL2CPP converts to C++ at build time. This only works in Mono builds (Editor + Mono builds).
@@ -793,7 +792,7 @@ We independently discovered and implemented the same solution.
 - [ ] Support for generic methods
 
 ### Medium Term
-- [ ] Virtual Engine for new methods
+- [x] Virtual Engine for new methods (dispatcher + trampolines)
 - [ ] Edit Mode hot reload
 - [ ] Multi-file batch compilation
 - [ ] Async/await state machine support

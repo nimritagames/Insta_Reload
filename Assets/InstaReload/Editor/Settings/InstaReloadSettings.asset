@@ -13,4 +13,7 @@ MonoBehaviour:
   m_Name: InstaReloadSettings
   m_EditorClassIdentifier: 
   enabled: 1
-  verboseLogging: 1
+  verboseLogging: 0
+  enabledLogLevels: 0
+  enabledLogCategories: 255
+  logSettingsVersion: 1

@@ -112,6 +112,7 @@
  * ============================================================================
  */
 
+using Nimrita.InstaReload;
 using UnityEditor;
 using UnityEngine;
 
@@ -171,6 +172,23 @@ namespace Nimrita.InstaReload.Editor
                 EditorApplication.LockReloadAssemblies();
 
                 _isLocked = true;
+
+                try
+                {
+                    var settings = InstaReloadSettings.GetOrCreateSettings();
+                    if (settings != null)
+                    {
+                        HotReloadDispatcher.ConfigureLogging(
+                            settings.EnabledLogCategories,
+                            settings.EnabledLogLevels);
+                    }
+
+                    HotReloadDispatcher.Clear();
+                }
+                catch (System.Exception ex)
+                {
+                    InstaReloadLogger.LogWarning($"[Suppressor] Failed to reset dispatcher: {ex.Message}");
+                }
 
                 InstaReloadLogger.Log("[Suppressor] ✓ Unity compilation BLOCKED");
                 InstaReloadLogger.Log("[Suppressor]   → AssetDatabase auto-refresh: DISABLED");
