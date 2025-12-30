@@ -16,11 +16,11 @@ public class HotTest : MonoBehaviour
 
     private void Update()
     {
-        Log("Hello World!", 10);
+        Log("Hello World!", 10, 'a');
     }
 
-    void Log(string message, int num)
+    void Log(string message, int num, char a)
     {
-        Debug.Log(message + " " + num);
+        Debug.Log(message + " " + num + " " + a);
     }
 }
