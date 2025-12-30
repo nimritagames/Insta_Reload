@@ -203,6 +203,9 @@ namespace Nimrita.InstaReload.Editor
 
         internal void ApplyAssembly(string assemblyPath, bool skipValidation = false)
         {
+            // Declare hot assembly here so it's visible throughout the method
+            System.Reflection.Assembly hotAssembly = null;
+
             try
             {
                 var runtimeAssembly = FindRuntimeAssembly();
@@ -216,12 +219,15 @@ namespace Nimrita.InstaReload.Editor
                 try
                 {
                     var assemblyBytes = System.IO.File.ReadAllBytes(assemblyPath);
-                    System.Reflection.Assembly.Load(assemblyBytes);
-                    InstaReloadLogger.Log($"[Patcher] ✓ Compiled assembly loaded - new methods now callable");
+
+                    // Load hot assembly - methods can now call each other!
+                    hotAssembly = System.Reflection.Assembly.Load(assemblyBytes);
+
+                    InstaReloadLogger.Log($"[Patcher] ✓ Hot assembly loaded: {hotAssembly.FullName}");
                 }
                 catch (Exception ex)
                 {
-                    InstaReloadLogger.LogWarning($"Failed to load compiled assembly: {ex.Message}");
+                    InstaReloadLogger.LogWarning($"Failed to load hot assembly: {ex.Message}");
                 }
 
                 ModuleDefinition updatedModule = null;
@@ -277,18 +283,15 @@ namespace Nimrita.InstaReload.Editor
                         var errors = new List<string>();
                         var newMethodNames = new List<string>();
 
+                        // NOTE: hotAssembly was loaded above (line 216-230)
+                        // We'll use it for native method swapping
+
                         foreach (var method in GetPatchableMethods(updatedModule))
                         {
                             var methodName = GetMethodKey(method);
 
                             // Skip Unity-generated methods
                             if (method.DeclaringType.Name.StartsWith("UnitySourceGenerated"))
-                            {
-                                skipped++;
-                                continue;
-                            }
-
-                            if (!IsMethodBodySupported(method))
                             {
                                 skipped++;
                                 continue;
@@ -305,9 +308,49 @@ namespace Nimrita.InstaReload.Editor
 
                             try
                             {
-                                var hook = new ILHook(runtimeMethod, ctx => ReplaceMethodBody(ctx, method));
-                                _hooks[key] = hook;
-                                patched++;
+                                // NATIVE JMP APPROACH: Find hot method and swap at assembly level
+                                MethodBase hotMethod = null;
+
+                                if (hotAssembly != null)
+                                {
+                                    var hotType = hotAssembly.GetType(method.DeclaringType.FullName);
+                                    if (hotType != null)
+                                    {
+                                        var flags = BindingFlags.Instance | BindingFlags.Static |
+                                                   BindingFlags.Public | BindingFlags.NonPublic;
+
+                                        // Find matching method in hot assembly
+                                        foreach (var m in hotType.GetMethods(flags))
+                                        {
+                                            if (GetMethodKey(m) == key)
+                                            {
+                                                hotMethod = m;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (hotMethod != null)
+                                {
+                                    // Use native method swapping!
+                                    if (NativeMethodSwapper.TrySwapMethod(runtimeMethod, hotMethod))
+                                    {
+                                        patched++;
+                                    }
+                                    else
+                                    {
+                                        skipped++;
+                                        errors.Add($"{methodName}: Native swap failed");
+                                    }
+                                }
+                                else
+                                {
+                                    // Fallback to MonoMod IL hook if hot method not found
+                                    var hook = new ILHook(runtimeMethod, ctx => ReplaceMethodBody(ctx, method));
+                                    _hooks[key] = hook;
+                                    patched++;
+                                }
                             }
                             catch (Exception ex)
                             {
