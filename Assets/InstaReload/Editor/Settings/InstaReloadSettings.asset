@@ -16,4 +16,6 @@ MonoBehaviour:
   verboseLogging: 0
   enabledLogLevels: -1
   enabledLogCategories: -1
+  autoApplyPlayModeSettings: 1
   logSettingsVersion: 1
+  settingsVersion: 1
