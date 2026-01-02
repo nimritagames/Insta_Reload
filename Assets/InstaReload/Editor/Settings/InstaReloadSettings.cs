@@ -8,13 +8,16 @@ namespace Nimrita.InstaReload.Editor
     {
         private const string SettingsPath = "Assets/InstaReload/Editor/Settings/InstaReloadSettings.asset";
         private const int LogSettingsVersion = 1;
-        private const int SettingsVersion = 1;
+        private const int SettingsVersion = 2;
 
         [SerializeField] private bool enabled = true;
         [SerializeField, HideInInspector] private bool verboseLogging = false;
         [SerializeField] private InstaReloadLogLevel enabledLogLevels = InstaReloadLogLevel.Info | InstaReloadLogLevel.Warning | InstaReloadLogLevel.Error;
         [SerializeField] private InstaReloadLogCategory enabledLogCategories = InstaReloadLogCategory.All;
         [SerializeField] private bool autoApplyPlayModeSettings = true;
+        [SerializeField] private bool useExternalWorker = true;
+        [SerializeField] private bool autoStartWorker = true;
+        [SerializeField] private int workerPort = 53530;
         [SerializeField, HideInInspector] private int logSettingsVersion = 0;
         [SerializeField, HideInInspector] private int settingsVersion = 0;
 
@@ -58,6 +61,24 @@ namespace Nimrita.InstaReload.Editor
         {
             get => autoApplyPlayModeSettings;
             set => autoApplyPlayModeSettings = value;
+        }
+
+        internal bool UseExternalWorker
+        {
+            get => useExternalWorker;
+            set => useExternalWorker = value;
+        }
+
+        internal bool AutoStartWorker
+        {
+            get => autoStartWorker;
+            set => autoStartWorker = value;
+        }
+
+        internal int WorkerPort
+        {
+            get => workerPort;
+            set => workerPort = Mathf.Clamp(value, 1, 65535);
         }
 
         internal bool IsLogLevelEnabled(InstaReloadLogLevel level)
@@ -109,6 +130,9 @@ namespace Nimrita.InstaReload.Editor
                 if (settings.settingsVersion < SettingsVersion)
                 {
                     settings.autoApplyPlayModeSettings = true;
+                    settings.useExternalWorker = true;
+                    settings.autoStartWorker = true;
+                    settings.workerPort = 53530;
                     settings.settingsVersion = SettingsVersion;
                     dirty = true;
                 }

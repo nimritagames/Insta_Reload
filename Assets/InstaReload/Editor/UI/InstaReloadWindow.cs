@@ -53,6 +53,9 @@ namespace Nimrita.InstaReload.Editor.UI
             DrawSettingsCard(settings);
             EditorGUILayout.Space(12);
 
+            DrawWorkerCard(settings);
+            EditorGUILayout.Space(12);
+
             DrawPlayModeAutomation(settings);
             EditorGUILayout.Space(12);
 
@@ -159,7 +162,75 @@ namespace Nimrita.InstaReload.Editor.UI
             EndCard();
         }
 
-        private void DrawPlayModeAutomation(InstaReloadSettings settings)
+        private void DrawWorkerCard(InstaReloadSettings settings)
+        {
+            BeginCard();
+            DrawSectionHeader("External Worker");
+
+            EditorGUI.BeginChangeCheck();
+            settings.UseExternalWorker = EditorGUILayout.Toggle(
+                new GUIContent("Use external worker", "Compile in a separate process to keep Unity responsive"),
+                settings.UseExternalWorker);
+            settings.AutoStartWorker = EditorGUILayout.Toggle(
+                new GUIContent("Auto-start worker", "Build and start the worker when Play Mode begins"),
+                settings.AutoStartWorker);
+            settings.WorkerPort = EditorGUILayout.IntField(
+                new GUIContent("Worker port", "Loopback port used for the worker connection"),
+                settings.WorkerPort);
+            if (EditorGUI.EndChangeCheck())
+            {
+                SaveSettings(settings);
+                if (EditorApplication.isPlaying && settings.Enabled)
+                {
+                    if (settings.UseExternalWorker)
+                    {
+                        Roslyn.InstaReloadWorkerClient.EnsureReady();
+                    }
+                    else
+                    {
+                        Roslyn.InstaReloadWorkerClient.Shutdown();
+                    }
+                }
+            }
+
+            var workerLine = Roslyn.InstaReloadWorkerClient.GetStatusLine();
+            if (string.IsNullOrEmpty(workerLine))
+            {
+                workerLine = "Worker: Disabled";
+            }
+
+            var helpType = Roslyn.InstaReloadWorkerClient.State == Roslyn.InstaReloadWorkerState.Failed
+                ? MessageType.Warning
+                : MessageType.Info;
+            var message = workerLine;
+            if (Roslyn.InstaReloadWorkerClient.State == Roslyn.InstaReloadWorkerState.Failed)
+            {
+                var error = Roslyn.InstaReloadWorkerClient.LastError;
+                if (!string.IsNullOrEmpty(error))
+                {
+                    message = $"{workerLine}\n{error}";
+                }
+            }
+
+            EditorGUILayout.HelpBox(message, helpType);
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Restart Worker", GUILayout.Width(160f)))
+                {
+                    Roslyn.InstaReloadWorkerClient.Shutdown();
+                    if (EditorApplication.isPlaying && settings.UseExternalWorker)
+                    {
+                        Roslyn.InstaReloadWorkerClient.EnsureReady();
+                    }
+                }
+            }
+
+            EndCard();
+        }
+
+        private void DrawPlayModeAutomation(InstaReloadSettings settings)       
         {
             BeginCard();
             DrawSectionHeader("Play Mode Automation");

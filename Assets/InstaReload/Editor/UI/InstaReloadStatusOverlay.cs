@@ -177,6 +177,12 @@ namespace Nimrita.InstaReload.Editor.UI
                 $"Status: {GetStatusText(snapshot)}"
             };
 
+            var workerLine = Roslyn.InstaReloadWorkerClient.GetStatusLine();
+            if (!string.IsNullOrEmpty(workerLine))
+            {
+                lines.Add(workerLine);
+            }
+
             if (!string.IsNullOrEmpty(snapshot.LastFileName))
             {
                 lines.Add($"File: {snapshot.LastFileName}");

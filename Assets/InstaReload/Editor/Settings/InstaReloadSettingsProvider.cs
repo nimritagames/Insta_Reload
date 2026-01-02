@@ -33,6 +33,34 @@ namespace Nimrita.InstaReload.Editor
                         serialized.FindProperty("autoApplyPlayModeSettings"),
                         new GUIContent("Auto-apply Play Mode settings"));
 
+                    EditorGUILayout.Space(6);
+                    EditorGUILayout.LabelField("Compilation", EditorStyles.boldLabel);
+                    EditorGUILayout.PropertyField(
+                        serialized.FindProperty("useExternalWorker"),
+                        new GUIContent("Use external worker"));
+                    EditorGUILayout.PropertyField(
+                        serialized.FindProperty("autoStartWorker"),
+                        new GUIContent("Auto-start worker"));
+                    EditorGUILayout.PropertyField(
+                        serialized.FindProperty("workerPort"),
+                        new GUIContent("Worker port"));
+
+                    var workerLine = Roslyn.InstaReloadWorkerClient.GetStatusLine();
+                    if (!string.IsNullOrEmpty(workerLine))
+                    {
+                        var message = workerLine;
+                        if (Roslyn.InstaReloadWorkerClient.State == Roslyn.InstaReloadWorkerState.Failed)
+                        {
+                            var error = Roslyn.InstaReloadWorkerClient.LastError;
+                            if (!string.IsNullOrEmpty(error))
+                            {
+                                message = $"{workerLine} ({error})";
+                            }
+                        }
+
+                        EditorGUILayout.HelpBox(message, MessageType.None);
+                    }
+
                     EditorGUILayout.HelpBox(
                         "Toggle the Dispatcher category to show or hide runtime dispatch diagnostics.",
                         MessageType.None);
@@ -62,6 +90,14 @@ namespace Nimrita.InstaReload.Editor
                         HotReloadDispatcher.ConfigureLogging(
                             settings.EnabledLogCategories,
                             settings.EnabledLogLevels);
+                        if (settings.Enabled && settings.UseExternalWorker)
+                        {
+                            Roslyn.InstaReloadWorkerClient.EnsureReady();
+                        }
+                        else
+                        {
+                            Roslyn.InstaReloadWorkerClient.Shutdown();
+                        }
                     }
                     if (changed && settings.AutoApplyPlayModeSettings)
                     {

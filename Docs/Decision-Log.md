@@ -90,6 +90,12 @@ professional without slowing iteration. Keep entries short and actionable.
   Options considered: Keep synchronous compile; reduce logging only; background compile with main-thread patch apply.
   Outcome: Added a compile job queue, background compilation, and stale-change checks before patching.
   Follow-ups: Monitor patch-time stalls and consider parallel compiles for multi-file changes.
+- 2026-01-03:
+  Decision: Introduce an external worker process to compile hot reload patches.
+  Context: Even background compilation could starve Unity's UI thread on slower machines.
+  Options considered: Keep in-process compile; throttle compilation; offload compile to a worker over loopback.
+  Outcome: Added a worker process with a loopback protocol and editor-side manager to compile outside Unity.
+  Follow-ups: Add richer protocol diagnostics and consider parallel compile workers.
 - 2025-__-__:
   Decision:
   Context:
