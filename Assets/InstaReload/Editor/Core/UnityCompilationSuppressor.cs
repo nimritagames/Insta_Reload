@@ -113,6 +113,7 @@
  */
 
 using Nimrita.InstaReload;
+using Nimrita.InstaReload.Editor.Roslyn;
 using UnityEditor;
 using UnityEngine;
 
@@ -143,6 +144,13 @@ namespace Nimrita.InstaReload.Editor
 
             switch (state)
             {
+                case PlayModeStateChange.ExitingEditMode:
+                    if (settings.AutoApplyPlayModeSettings &&
+                        InstaReloadPlayModeSettings.ApplyRecommendedSettings())
+                    {
+                        InstaReloadLogger.Log(InstaReloadLogCategory.UI, "Auto-applied Play Mode settings for InstaReload.");
+                    }
+                    break;
                 case PlayModeStateChange.EnteredPlayMode:
                     EnableSuppression();
                     break;
@@ -185,6 +193,9 @@ namespace Nimrita.InstaReload.Editor
 
                     HotReloadDispatcher.Clear();
                     HotReloadEntryPointManager.Clear();
+                    FileChangeDetector.ReplayCachedPatches();
+                    InstaReloadSessionMetrics.Reset();
+                    InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Waiting for changes");
                 }
                 catch (System.Exception ex)
                 {
@@ -228,6 +239,7 @@ namespace Nimrita.InstaReload.Editor
 
                 InstaReloadLogger.Log("[Suppressor] ✓ Unity compilation RESTORED");
                 InstaReloadLogger.Log("[Suppressor]   → Processing pending changes...");
+                InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Play Mode ended");
             }
             catch (System.Exception ex)
             {

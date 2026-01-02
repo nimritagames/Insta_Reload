@@ -310,15 +310,21 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
-        internal void ApplyAssembly(string assemblyPath, bool skipValidation = false)
+        internal PatchApplyResult ApplyAssembly(
+            string assemblyPath,
+            bool skipValidation = false,
+            PatchReplayContext replayContext = null,
+            bool preserveExistingHooks = false)
         {
+            Assembly runtimeAssembly = null;
             try
             {
-                var runtimeAssembly = FindRuntimeAssembly();
+                runtimeAssembly = FindRuntimeAssembly();
                 if (runtimeAssembly == null)
                 {
-                    InstaReloadLogger.LogError($"Assembly '{_assemblyName}' not loaded - make sure it's referenced in your project");
-                    return;
+                    var error = $"Assembly '{_assemblyName}' not loaded - make sure it's referenced in your project";
+                    InstaReloadLogger.LogError(InstaReloadLogCategory.Patcher, error);
+                    return CreateFailureResult(Guid.Empty, error);
                 }
 
                 // THE MAGIC: Load compiled assembly so new methods exist at runtime
@@ -352,8 +358,9 @@ namespace Nimrita.InstaReload.Editor
                 }
                 catch (Exception ex)
                 {
-                    InstaReloadLogger.LogError($"Failed to load compiled assembly: {ex.Message}");
-                    return;
+                    var error = $"Failed to load compiled assembly: {ex.Message}";
+                    InstaReloadLogger.LogError(InstaReloadLogCategory.Patcher, error);
+                    return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                 }
 
                 using (updatedModule)
@@ -364,9 +371,10 @@ namespace Nimrita.InstaReload.Editor
                     {
                         if (!IsCompatible(runtimeAssembly, updatedModule, out var reason))
                         {
-                            InstaReloadLogger.LogWarning($"⚠ Structural change: {reason}");
+                            var error = $"Structural change: {reason}";
+                            InstaReloadLogger.LogWarning(InstaReloadLogCategory.Patcher, error);
                             InstaReloadLogger.LogWarning(InstaReloadLogCategory.Patcher, "→ Exit Play Mode to apply this change");
-                            return;
+                            return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                         }
                     }
                     else
@@ -375,20 +383,27 @@ namespace Nimrita.InstaReload.Editor
                     }
 
                     var runtimeMethods = BuildRuntimeMethodMap(runtimeAssembly);
+                    var runtimeMethodTokens = BuildRuntimeMethodTokenMap(runtimeAssembly);
                     var runtimeFields = BuildRuntimeFieldMap(runtimeAssembly);
                     var methodIds = BuildMethodIdMap(updatedModule);
                     var dispatchKeys = BuildDispatchKeySet(updatedModule, runtimeMethods);
+                    var runtimeMvid = runtimeAssembly.ManifestModule.ModuleVersionId;
+                    var useTokenReplay = replayContext != null && replayContext.CanUseTokens(runtimeMvid);
 
                     var dispatcherInvokeMethod = ResolveDispatcherInvokeMethod(runtimeAssembly);
                     if (dispatcherInvokeMethod == null)
                     {
-                        InstaReloadLogger.LogError("[Patcher] Dispatcher Invoke method not found");
-                        return;
+                        var error = "Dispatcher Invoke method not found";
+                        InstaReloadLogger.LogError(InstaReloadLogCategory.Patcher, error);
+                        return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                     }
 
                     lock (_sync)
                     {
-                        DisposeMethodHooks();
+                        if (!preserveExistingHooks)
+                        {
+                            DisposeMethodHooks();
+                        }
 
                         int patched = 0;
                         int skipped = 0;
@@ -398,6 +413,26 @@ namespace Nimrita.InstaReload.Editor
                         var errors = new List<string>();
                         var newMethodNames = new List<string>();
                         var missingEntryPoints = new List<string>();
+                        var tokenPairs = new Dictionary<int, MethodTokenPair>();
+                        var patchRecords = new Dictionary<string, MethodPatchRecord>(StringComparer.Ordinal);
+
+                        void RecordPatch(string methodKey, HotReloadPatchKind kind, MethodBase runtimeMethod)
+                        {
+                            if (string.IsNullOrEmpty(methodKey))
+                            {
+                                return;
+                            }
+
+                            if (patchRecords.TryGetValue(methodKey, out var existing))
+                            {
+                                var mergedKind = existing.Kind | kind;
+                                var mergedMethod = existing.RuntimeMethod ?? runtimeMethod;
+                                patchRecords[methodKey] = new MethodPatchRecord(methodKey, mergedKind, mergedMethod);
+                                return;
+                            }
+
+                            patchRecords[methodKey] = new MethodPatchRecord(methodKey, kind, runtimeMethod);
+                        }
 
                         foreach (var method in GetPatchableMethods(updatedModule))
                         {
@@ -410,9 +445,13 @@ namespace Nimrita.InstaReload.Editor
                                 continue;
                             }
 
-                            if (!IsMethodBodySupported(method))
+                            if (!IsMethodBodySupported(method, runtimeFields, out var unsupportedReason))
                             {
                                 skipped++;
+                                if (!string.IsNullOrEmpty(unsupportedReason))
+                                {
+                                    errors.Add($"{methodName}: {unsupportedReason}");
+                                }
                                 continue;
                             }
 
@@ -422,14 +461,24 @@ namespace Nimrita.InstaReload.Editor
                             {
                                 try
                                 {
+                                    var runtimeEntryPointMethod = ResolveRuntimeMethod(
+                                        method,
+                                        key,
+                                        runtimeMethods,
+                                        runtimeMethodTokens,
+                                        replayContext,
+                                        useTokenReplay);
+
                                     if (methodIds.TryGetValue(key, out var methodId))
                                     {
-                                        if (runtimeMethods.TryGetValue(key, out var runtimeEntryPointMethod))
+                                        if (runtimeEntryPointMethod != null)
                                         {
                                             if (EnsureTrampoline(runtimeEntryPointMethod, key, dispatcherInvokeMethod, methodId))
                                             {
                                                 trampolines++;
+                                                RecordPatch(key, HotReloadPatchKind.Trampoline, runtimeEntryPointMethod);
                                             }
+                                            TryTrackTokenPair(tokenPairs, method, runtimeEntryPointMethod, key);
                                         }
                                         else
                                         {
@@ -458,6 +507,7 @@ namespace Nimrita.InstaReload.Editor
                                     if (TryRegisterDispatcher(method, runtimeAssembly, runtimeMethods, runtimeFields, methodIds, dispatchKeys, dispatcherInvokeMethod, out var error))
                                     {
                                         dispatched++;
+                                        RecordPatch(key, HotReloadPatchKind.Dispatched, runtimeEntryPointMethod);
                                     }
                                     else
                                     {
@@ -477,15 +527,30 @@ namespace Nimrita.InstaReload.Editor
                                 continue;
                             }
 
-                            if (runtimeMethods.TryGetValue(key, out var runtimeTargetMethod))
+                            var runtimeTargetMethod = ResolveRuntimeMethod(
+                                method,
+                                key,
+                                runtimeMethods,
+                                runtimeMethodTokens,
+                                replayContext,
+                                useTokenReplay);
+
+                            if (runtimeTargetMethod != null)
                             {
                                 try
                                 {
                                     var hook = new ILHook(
                                         runtimeTargetMethod,
                                         ctx => ReplaceMethodBody(ctx, method, runtimeAssembly, runtimeMethods, runtimeFields, methodIds, dispatchKeys, dispatcherInvokeMethod));
+                                    if (_methodHooks.TryGetValue(key, out var existingHook))
+                                    {
+                                        existingHook.Dispose();
+                                        _methodHooks.Remove(key);
+                                    }
                                     _methodHooks[key] = hook;
                                     patched++;
+                                    RecordPatch(key, HotReloadPatchKind.Patched, runtimeTargetMethod);
+                                    TryTrackTokenPair(tokenPairs, method, runtimeTargetMethod, key);
                                 }
                                 catch (Exception ex)
                                 {
@@ -516,6 +581,7 @@ namespace Nimrita.InstaReload.Editor
                                     newMethods++;
                                     dispatched++;
                                     newMethodNames.Add(methodName);
+                                    RecordPatch(key, HotReloadPatchKind.Dispatched, runtimeTargetMethod);
                                 }
                                 else
                                 {
@@ -584,7 +650,7 @@ namespace Nimrita.InstaReload.Editor
 
                         if (errors.Count > 0)
                         {
-                            InstaReloadLogger.LogError($"Failed to patch {errors.Count} method(s):");
+                            InstaReloadLogger.LogError($"[Patcher] Failed to patch {errors.Count} method(s) in {_assemblyName}:");
                             foreach (var error in errors.Take(5)) // Show max 5 errors
                             {
                                 InstaReloadLogger.LogError($"  -> {error}");
@@ -594,14 +660,44 @@ namespace Nimrita.InstaReload.Editor
                                 InstaReloadLogger.LogError($"  ... and {errors.Count - 5} more");
                             }
                         }
+
+                        return new PatchApplyResult(
+                            _assemblyName,
+                            runtimeMvid,
+                            tokenPairs.Values.ToList(),
+                            patched,
+                            dispatched,
+                            trampolines,
+                            skipped,
+                            errors,
+                            patchRecords.Values.ToList());
                     }
                 }
             }
             catch (Exception ex)
             {
-                InstaReloadLogger.LogError($"Hot reload failed: {ex.Message}");
-                InstaReloadLogger.LogError($"→ Try exiting Play Mode and re-entering");
+                InstaReloadLogger.LogError($"[Patcher] Hot reload failed for {_assemblyName}: {ex.Message}");
+                InstaReloadLogger.LogError("[Patcher] Try exiting Play Mode and re-entering");
+                var runtimeMvid = runtimeAssembly != null ? runtimeAssembly.ManifestModule.ModuleVersionId : Guid.Empty;
+                return CreateFailureResult(runtimeMvid, $"Hot reload failed: {ex.Message}");
             }
+        }
+
+        private PatchApplyResult CreateFailureResult(Guid runtimeMvid, string error)
+        {
+            var errors = string.IsNullOrEmpty(error)
+                ? Array.Empty<string>()
+                : new[] { error };
+
+            return new PatchApplyResult(
+                _assemblyName,
+                runtimeMvid,
+                Array.Empty<MethodTokenPair>(),
+                0,
+                0,
+                0,
+                0,
+                errors);
         }
 
         private void DisposeAllHooks()
@@ -821,8 +917,7 @@ namespace Nimrita.InstaReload.Editor
 
             if (!updatedFields.SetEquals(runtimeFields))
             {
-                reason = $"Field set changed in {runtimeType.FullName}.";
-                return false;
+                InstaReloadLogger.LogWarning($"[Patcher] Field set changed in {runtimeType.FullName}. Missing fields will use the field store.");
             }
 
             reason = string.Empty;
@@ -865,12 +960,65 @@ namespace Nimrita.InstaReload.Editor
             return true;
         }
 
-        private static bool IsMethodBodySupported(MethodDefinition method)
+        private static bool IsMethodBodySupported(
+            MethodDefinition method,
+            IReadOnlyDictionary<string, FieldInfo> runtimeFields,
+            out string reason)
         {
             foreach (var instruction in method.Body.Instructions)
             {
                 if (!IsOperandSupported(instruction.Operand))
                 {
+                    reason = $"Unsupported operand in {method.Name}.";
+                    return false;
+                }
+            }
+
+            if (!IsFieldRewriteSupported(method, runtimeFields, out reason))
+            {
+                return false;
+            }
+
+            reason = string.Empty;
+            return true;
+        }
+
+        private static bool IsFieldRewriteSupported(
+            MethodDefinition method,
+            IReadOnlyDictionary<string, FieldInfo> runtimeFields,
+            out string reason)
+        {
+            reason = string.Empty;
+            if (runtimeFields == null || runtimeFields.Count == 0)
+            {
+                return true;
+            }
+
+            foreach (var instruction in method.Body.Instructions)
+            {
+                if (!(instruction.Operand is FieldReference fieldReference))
+                {
+                    continue;
+                }
+
+                var fieldKey = GetFieldLookupKey(fieldReference);
+                if (instruction.OpCode == CecilOpCodes.Ldsfld || instruction.OpCode == CecilOpCodes.Stsfld)
+                {
+                    fieldKey = OverrideFieldKeyStatic(fieldKey, isStatic: true);
+                }
+                else if (instruction.OpCode == CecilOpCodes.Ldfld || instruction.OpCode == CecilOpCodes.Stfld)
+                {
+                    fieldKey = OverrideFieldKeyStatic(fieldKey, isStatic: false);
+                }
+                if (runtimeFields.ContainsKey(fieldKey))
+                {
+                    continue;
+                }
+
+                if (instruction.OpCode == CecilOpCodes.Ldflda ||
+                    instruction.OpCode == CecilOpCodes.Ldsflda)
+                {
+                    reason = $"Missing field address access not supported: {fieldKey}.";
                     return false;
                 }
             }
@@ -914,6 +1062,84 @@ namespace Nimrita.InstaReload.Editor
             }
 
             return map;
+        }
+
+        private static Dictionary<int, MethodBase> BuildRuntimeMethodTokenMap(Assembly runtimeAssembly)
+        {
+            var map = new Dictionary<int, MethodBase>();
+            foreach (var type in runtimeAssembly.GetTypes())
+            {
+                var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+                foreach (var method in type.GetMethods(flags))
+                {
+                    map[method.MetadataToken] = method;
+                }
+
+                foreach (var ctor in type.GetConstructors(flags))
+                {
+                    map[ctor.MetadataToken] = ctor;
+                }
+
+                if (type.TypeInitializer != null)
+                {
+                    map[type.TypeInitializer.MetadataToken] = type.TypeInitializer;
+                }
+            }
+
+            return map;
+        }
+
+        private static MethodBase ResolveRuntimeMethod(
+            MethodDefinition patchMethod,
+            string methodKey,
+            IReadOnlyDictionary<string, MethodBase> runtimeMethods,
+            IReadOnlyDictionary<int, MethodBase> runtimeMethodTokens,
+            PatchReplayContext replayContext,
+            bool useTokenReplay)
+        {
+            if (useTokenReplay && patchMethod != null)
+            {
+                var patchToken = patchMethod.MetadataToken.ToInt32();
+                if (patchToken != 0 && replayContext != null &&
+                    replayContext.TryGetRuntimeToken(patchToken, out var runtimeToken))
+                {
+                    if (runtimeMethodTokens.TryGetValue(runtimeToken, out var runtimeMethod))
+                    {
+                        return runtimeMethod;
+                    }
+                }
+            }
+
+            runtimeMethods.TryGetValue(methodKey, out var resolved);
+            return resolved;
+        }
+
+        private static void TryTrackTokenPair(
+            IDictionary<int, MethodTokenPair> tokenPairs,
+            MethodDefinition patchMethod,
+            MethodBase runtimeMethod,
+            string methodKey)
+        {
+            if (patchMethod == null || runtimeMethod == null || tokenPairs == null)
+            {
+                return;
+            }
+
+            var patchToken = patchMethod.MetadataToken.ToInt32();
+            if (patchToken == 0 || tokenPairs.ContainsKey(patchToken))
+            {
+                return;
+            }
+
+            try
+            {
+                var runtimeToken = runtimeMethod.MetadataToken;
+                tokenPairs[patchToken] = new MethodTokenPair(patchToken, runtimeToken, methodKey);
+            }
+            catch
+            {
+                // Ignore token tracking failures.
+            }
         }
 
         private static Dictionary<string, FieldInfo> BuildRuntimeFieldMap(Assembly runtimeAssembly)
@@ -1255,7 +1481,15 @@ namespace Nimrita.InstaReload.Editor
                 dispatcherInvokeMethod,
                 targetIncludesThis: !updatedMethod.IsStatic);
 
-            CloneMethodBody(dmd.Definition, updatedMethod, context);
+            try
+            {
+                CloneMethodBody(dmd.Definition, updatedMethod, context);
+            }
+            catch (Exception ex)
+            {
+                InstaReloadLogger.LogWarning($"[Patcher] Failed to clone method body for dispatcher: {ex.Message}");
+                return null;
+            }
 
             return dmd.Generate();
         }
@@ -1364,6 +1598,29 @@ namespace Nimrita.InstaReload.Editor
                 DispatcherInvoke = dispatcherInvokeMethod != null
                     ? targetModule.ImportReference(dispatcherInvokeMethod)
                     : null;
+                TypeGetTypeFromHandle = ImportMethodReference(
+                    targetModule,
+                    typeof(Type).GetMethod("GetTypeFromHandle", new[] { typeof(RuntimeTypeHandle) }));
+                FieldStoreGetInstance = ImportMethodReference(
+                    targetModule,
+                    typeof(HotReloadFieldStore).GetMethod(
+                        "GetInstanceField",
+                        new[] { typeof(object), typeof(string), typeof(Type) }));
+                FieldStoreSetInstance = ImportMethodReference(
+                    targetModule,
+                    typeof(HotReloadFieldStore).GetMethod(
+                        "SetInstanceField",
+                        new[] { typeof(object), typeof(string), typeof(object) }));
+                FieldStoreGetStatic = ImportMethodReference(
+                    targetModule,
+                    typeof(HotReloadFieldStore).GetMethod(
+                        "GetStaticField",
+                        new[] { typeof(string), typeof(Type) }));
+                FieldStoreSetStatic = ImportMethodReference(
+                    targetModule,
+                    typeof(HotReloadFieldStore).GetMethod(
+                        "SetStaticField",
+                        new[] { typeof(string), typeof(object) }));
             }
 
             public ModuleDefinition TargetModule { get; }
@@ -1374,6 +1631,18 @@ namespace Nimrita.InstaReload.Editor
             public ISet<string> DispatchKeys { get; }
             public bool TargetIncludesThis { get; }
             public MethodReference DispatcherInvoke { get; }
+            public MethodReference TypeGetTypeFromHandle { get; }
+            public MethodReference FieldStoreGetInstance { get; }
+            public MethodReference FieldStoreSetInstance { get; }
+            public MethodReference FieldStoreGetStatic { get; }
+            public MethodReference FieldStoreSetStatic { get; }
+
+            public bool HasFieldStore =>
+                TypeGetTypeFromHandle != null &&
+                FieldStoreGetInstance != null &&
+                FieldStoreSetInstance != null &&
+                FieldStoreGetStatic != null &&
+                FieldStoreSetStatic != null;
         }
 
         private static void CloneMethodBody(
@@ -1400,6 +1669,26 @@ namespace Nimrita.InstaReload.Editor
 
             foreach (var instruction in updatedMethod.Body.Instructions)
             {
+                var fieldRewrite = TryRewriteFieldInstruction(
+                    instruction,
+                    targetMethod,
+                    context,
+                    out var fieldEmitted,
+                    out var fieldError);
+                if (fieldRewrite == FieldRewriteResult.Rewritten)
+                {
+                    instructionMap[instruction] = fieldEmitted[0];
+                    foreach (var emittedInstruction in fieldEmitted)
+                    {
+                        il.Append(emittedInstruction);
+                    }
+                    continue;
+                }
+                if (fieldRewrite == FieldRewriteResult.Unsupported)
+                {
+                    throw new NotSupportedException(fieldError ?? "Unsupported field rewrite.");
+                }
+
                 if (TryRewriteCallInstruction(instruction, targetMethod, context, out var emitted))
                 {
                     instructionMap[instruction] = emitted[0];
@@ -1442,6 +1731,153 @@ namespace Nimrita.InstaReload.Editor
             }
 
             body.OptimizeMacros();
+        }
+
+        private enum FieldRewriteResult
+        {
+            None,
+            Rewritten,
+            Unsupported
+        }
+
+        private static FieldRewriteResult TryRewriteFieldInstruction(
+            Instruction instruction,
+            MethodDefinition targetMethod,
+            MethodRewriteContext context,
+            out List<Instruction> emitted,
+            out string error)
+        {
+            emitted = null;
+            error = null;
+
+            if (!(instruction.Operand is FieldReference fieldReference))
+            {
+                return FieldRewriteResult.None;
+            }
+
+            if (instruction.OpCode != CecilOpCodes.Ldfld &&
+                instruction.OpCode != CecilOpCodes.Stfld &&
+                instruction.OpCode != CecilOpCodes.Ldsfld &&
+                instruction.OpCode != CecilOpCodes.Stsfld &&
+                instruction.OpCode != CecilOpCodes.Ldflda &&
+                instruction.OpCode != CecilOpCodes.Ldsflda)
+            {
+                return FieldRewriteResult.None;
+            }
+
+            var fieldKey = GetFieldLookupKey(fieldReference);
+            if (instruction.OpCode == CecilOpCodes.Ldsfld || instruction.OpCode == CecilOpCodes.Stsfld)
+            {
+                fieldKey = OverrideFieldKeyStatic(fieldKey, isStatic: true);
+            }
+            else if (instruction.OpCode == CecilOpCodes.Ldfld || instruction.OpCode == CecilOpCodes.Stfld)
+            {
+                fieldKey = OverrideFieldKeyStatic(fieldKey, isStatic: false);
+            }
+            if (context.RuntimeFields != null &&
+                context.RuntimeFields.TryGetValue(fieldKey, out _))
+            {
+                return FieldRewriteResult.None;
+            }
+
+            if (!context.HasFieldStore)
+            {
+                error = $"Field store unavailable for {fieldKey}.";
+                return FieldRewriteResult.Unsupported;
+            }
+
+            if (instruction.OpCode == CecilOpCodes.Ldflda ||
+                instruction.OpCode == CecilOpCodes.Ldsflda)
+            {
+                error = $"Missing field address access not supported: {fieldKey}.";
+                return FieldRewriteResult.Unsupported;
+            }
+
+            var fieldType = ImportTypeReference(context, fieldReference.FieldType);
+            var objectType = context.TargetModule.ImportReference(typeof(object));
+            var newInstructions = new List<Instruction>();
+
+            if (instruction.OpCode == CecilOpCodes.Ldfld)
+            {
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldstr, fieldKey));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldtoken, fieldType));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Call, context.TypeGetTypeFromHandle));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Call, context.FieldStoreGetInstance));
+
+                if (fieldReference.FieldType.IsValueType)
+                {
+                    newInstructions.Add(Instruction.Create(CecilOpCodes.Unbox_Any, fieldType));
+                }
+                else
+                {
+                    newInstructions.Add(Instruction.Create(CecilOpCodes.Castclass, fieldType));
+                }
+
+                emitted = newInstructions;
+                return FieldRewriteResult.Rewritten;
+            }
+
+            if (instruction.OpCode == CecilOpCodes.Stfld)
+            {
+                var instanceLocal = new VariableDefinition(objectType);
+                var valueLocal = new VariableDefinition(objectType);
+                targetMethod.Body.Variables.Add(valueLocal);
+                targetMethod.Body.Variables.Add(instanceLocal);
+
+                if (fieldReference.FieldType.IsValueType)
+                {
+                    newInstructions.Add(Instruction.Create(CecilOpCodes.Box, fieldType));
+                }
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Stloc, valueLocal));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Stloc, instanceLocal));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldloc, instanceLocal));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldstr, fieldKey));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldloc, valueLocal));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Call, context.FieldStoreSetInstance));
+
+                emitted = newInstructions;
+                return FieldRewriteResult.Rewritten;
+            }
+
+            if (instruction.OpCode == CecilOpCodes.Ldsfld)
+            {
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldstr, fieldKey));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldtoken, fieldType));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Call, context.TypeGetTypeFromHandle));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Call, context.FieldStoreGetStatic));
+
+                if (fieldReference.FieldType.IsValueType)
+                {
+                    newInstructions.Add(Instruction.Create(CecilOpCodes.Unbox_Any, fieldType));
+                }
+                else
+                {
+                    newInstructions.Add(Instruction.Create(CecilOpCodes.Castclass, fieldType));
+                }
+
+                emitted = newInstructions;
+                return FieldRewriteResult.Rewritten;
+            }
+
+            if (instruction.OpCode == CecilOpCodes.Stsfld)
+            {
+                var valueLocal = new VariableDefinition(objectType);
+                targetMethod.Body.Variables.Add(valueLocal);
+
+                if (fieldReference.FieldType.IsValueType)
+                {
+                    newInstructions.Add(Instruction.Create(CecilOpCodes.Box, fieldType));
+                }
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Stloc, valueLocal));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldstr, fieldKey));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Ldloc, valueLocal));
+                newInstructions.Add(Instruction.Create(CecilOpCodes.Call, context.FieldStoreSetStatic));
+
+                emitted = newInstructions;
+                return FieldRewriteResult.Rewritten;
+            }
+
+            return FieldRewriteResult.None;
         }
 
         private static bool TryRewriteCallInstruction(
@@ -1692,6 +2128,22 @@ namespace Nimrita.InstaReload.Editor
             return $"{typeName}::{field.Name}:{fieldType}:{(isStatic ? "static" : "instance")}";
         }
 
+        private static string OverrideFieldKeyStatic(string fieldKey, bool isStatic)
+        {
+            if (string.IsNullOrEmpty(fieldKey))
+            {
+                return fieldKey;
+            }
+
+            var lastColon = fieldKey.LastIndexOf(':');
+            if (lastColon < 0)
+            {
+                return fieldKey;
+            }
+
+            return $"{fieldKey.Substring(0, lastColon + 1)}{(isStatic ? "static" : "instance")}";
+        }
+
         private static string GetFieldLookupKey(FieldInfo field)
         {
             var typeName = field.DeclaringType != null ? NormalizeTypeName(field.DeclaringType.FullName) : string.Empty;
@@ -1814,6 +2266,11 @@ namespace Nimrita.InstaReload.Editor
             }
 
             return context.TargetModule.ImportReference(type);
+        }
+
+        private static MethodReference ImportMethodReference(ModuleDefinition module, MethodInfo method)
+        {
+            return method != null ? module.ImportReference(method) : null;
         }
 
         private static string GetTypeName(TypeReference type)

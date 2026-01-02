@@ -60,9 +60,39 @@ professional without slowing iteration. Keep entries short and actionable.
   Options considered: Keep them in fallback; add an opt-in attribute; remove from fallback by default.
   Outcome: Removed these methods from the fallback map and proxy dispatch path.
   Follow-ups: Consider an explicit opt-in replay mechanism if needed later.
+- 2025-12-31:
+  Decision: Persist hot reload patches and replay them at Play Mode entry with token-aware method resolution.
+  Context: Domain reloads clear IL hooks; replaying patches improves reliability, and token mapping is more robust than name-only lookup when reapplying.
+  Options considered: Rely on Unity's next compile; recompile from source on reload; cache patch assemblies and reuse them with token mapping.
+  Outcome: Added PatchHistoryStore for patch persistence, replay on Play Mode enter, token-pair caching, and token-based runtime method resolution with MVID validation.
+  Follow-ups: Monitor replay cache growth and consider pruning or UI controls if needed.
+- 2025-12-31:
+  Decision: Allow field set changes via a runtime field store.
+  Context: Field additions or type changes previously forced a Play Mode restart.
+  Options considered: Keep strict field-set validation; only allow new fields; virtualize missing fields through a separate store.
+  Outcome: Added HotReloadFieldStore and IL rewrites for missing fields, with safeguards against missing field address access.
+  Follow-ups: Consider initializer replay or opt-in migration for more complex field initialization.
+- 2025-12-31:
+  Decision: Add hot reload callbacks via attributes.
+  Context: Users want to react when patches are applied (e.g., refresh caches).
+  Options considered: Polling APIs; manual hooks; attribute-driven callbacks.
+  Outcome: Added InvokeOnHotReload and InvokeOnHotReloadLocal attributes with an editor invoker.
+  Follow-ups: Add more callback context if needed (per-method patch details).
+- 2026-01-02:
+  Decision: Automate Unity Play Mode option setup for InstaReload with opt-in auto-apply.
+  Context: Hot reload requires Enter Play Mode Options with domain/scene reload disabled, and manual setup is easy to miss.
+  Options considered: Keep instructions only; prompt every Play Mode entry; auto-apply when enabled.
+  Outcome: Added a setting toggle and one-click apply in the editor UI, plus auto-apply on Play Mode entry when enabled.
+  Follow-ups: Consider warning in the overlay if settings drift.
+- 2026-01-03:
+  Decision: Move Roslyn compilation to a background task and keep patching on the main thread.
+  Context: Synchronous compilation stalled the editor during hot reload, especially on slow path edits.
+  Options considered: Keep synchronous compile; reduce logging only; background compile with main-thread patch apply.
+  Outcome: Added a compile job queue, background compilation, and stale-change checks before patching.
+  Follow-ups: Monitor patch-time stalls and consider parallel compiles for multi-file changes.
 - 2025-__-__:
   Decision:
   Context:
-  Options considered: 
-  Outcome: 
+  Options considered:
+  Outcome:
   Follow-ups: 

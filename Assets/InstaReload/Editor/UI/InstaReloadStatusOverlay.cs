@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using Nimrita.InstaReload.Editor;
 using UnityEditor;
 using UnityEngine;
 
@@ -56,12 +58,22 @@ namespace Nimrita.InstaReload.Editor.UI
 
         private static void DrawStatusBadge(SceneView sceneView)
         {
-            var badgeSize = new Vector2(150, 30);
+            var snapshot = InstaReloadSessionMetrics.GetSnapshot();
+            var lines = BuildStatusLines(snapshot);
+            if (lines.Count == 0)
+            {
+                return;
+            }
+
+            const float padding = 6f;
+            const float lineHeight = 16f;
+            var badgeWidth = Mathf.Min(320f, sceneView.position.width - 20f);
+            var badgeHeight = padding * 2 + lineHeight * lines.Count;
             var badgeRect = new Rect(
-                sceneView.position.width - badgeSize.x - 10,
+                sceneView.position.width - badgeWidth - 10,
                 10,
-                badgeSize.x,
-                badgeSize.y
+                badgeWidth,
+                badgeHeight
             );
 
             var boxStyle = new GUIStyle(GUI.skin.box)
@@ -72,14 +84,39 @@ namespace Nimrita.InstaReload.Editor.UI
 
             GUI.Box(badgeRect, "", boxStyle);
 
-            var labelStyle = new GUIStyle(EditorStyles.boldLabel)
+            var headerStyle = new GUIStyle(EditorStyles.boldLabel)
             {
                 fontSize = 11,
-                alignment = TextAnchor.MiddleCenter,
-                normal = { textColor = new Color(0.4f, 0.9f, 0.4f) }
+                alignment = TextAnchor.UpperLeft,
+                normal = { textColor = Color.white }
             };
 
-            GUI.Label(badgeRect, "⚡ Hot Reload Active", labelStyle);
+            var labelStyle = new GUIStyle(EditorStyles.label)
+            {
+                fontSize = 11,
+                alignment = TextAnchor.UpperLeft,
+                normal = { textColor = new Color(0.85f, 0.85f, 0.85f) }
+            };
+
+            var statusStyle = new GUIStyle(labelStyle)
+            {
+                normal = { textColor = GetStatusColor(snapshot.Status) }
+            };
+
+            var contentRect = new Rect(
+                badgeRect.x + padding,
+                badgeRect.y + padding,
+                badgeRect.width - padding * 2,
+                lineHeight);
+
+            GUI.Label(contentRect, lines[0], headerStyle);
+
+            for (int i = 1; i < lines.Count; i++)
+            {
+                contentRect.y += lineHeight;
+                var style = i == 1 ? statusStyle : labelStyle;
+                GUI.Label(contentRect, lines[i], style);
+            }
         }
 
         private static void DrawTemporaryMessage(SceneView sceneView, float elapsed)
@@ -130,6 +167,107 @@ namespace Nimrita.InstaReload.Editor.UI
             texture.SetPixels(pixels);
             texture.Apply();
             return texture;
+        }
+
+        private static List<string> BuildStatusLines(InstaReloadSessionSnapshot snapshot)
+        {
+            var lines = new List<string>
+            {
+                "InstaReload",
+                $"Status: {GetStatusText(snapshot)}"
+            };
+
+            if (!string.IsNullOrEmpty(snapshot.LastFileName))
+            {
+                lines.Add($"File: {snapshot.LastFileName}");
+            }
+
+            if (snapshot.LastCompileMs > 0 || snapshot.FastCompileCount > 0 || snapshot.SlowCompileCount > 0)
+            {
+                lines.Add($"Compile: {FormatDuration(snapshot.LastCompileMs)} ({FormatCompilePath(snapshot.LastCompilePath)})");
+                lines.Add($"Compile avg: fast {FormatDuration(snapshot.FastCompileAverageMs)} ({snapshot.FastCompileCount}), slow {FormatDuration(snapshot.SlowCompileAverageMs)} ({snapshot.SlowCompileCount})");
+            }
+            else
+            {
+                lines.Add("Compile: --");
+            }
+
+            if (snapshot.PatchAttemptCount > 0 || snapshot.LastPatchMs > 0)
+            {
+                lines.Add($"Patch: {FormatDuration(snapshot.LastPatchMs)} | ok {snapshot.PatchSuccessCount} / fail {snapshot.PatchFailureCount}");
+                lines.Add($"Last patch: p{snapshot.LastPatchedCount} d{snapshot.LastDispatchedCount} t{snapshot.LastTrampolineCount} s{snapshot.LastSkippedCount} e{snapshot.LastErrorCount}");
+            }
+            else
+            {
+                lines.Add("Patch: --");
+            }
+
+            if (!string.IsNullOrEmpty(snapshot.LastErrorSummary))
+            {
+                lines.Add($"Error: {TrimText(snapshot.LastErrorSummary, 80)}");
+            }
+
+            return lines;
+        }
+
+        private static string GetStatusText(InstaReloadSessionSnapshot snapshot)
+        {
+            var status = string.IsNullOrEmpty(snapshot.StatusDetail)
+                ? snapshot.Status.ToString()
+                : snapshot.StatusDetail;
+
+            if (!string.IsNullOrEmpty(snapshot.LastAssemblyName) &&
+                snapshot.Status == InstaReloadOperationStatus.Patching)
+            {
+                status = $"{status} ({snapshot.LastAssemblyName})";
+            }
+
+            return status;
+        }
+
+        private static string FormatDuration(double ms)
+        {
+            return ms > 0 ? $"{ms:F0}ms" : "--";
+        }
+
+        private static string FormatCompilePath(InstaReloadCompilePath path)
+        {
+            switch (path)
+            {
+                case InstaReloadCompilePath.Fast:
+                    return "fast";
+                case InstaReloadCompilePath.Slow:
+                    return "slow";
+                default:
+                    return "n/a";
+            }
+        }
+
+        private static string TrimText(string text, int maxLength)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length <= maxLength)
+            {
+                return text;
+            }
+
+            return text.Substring(0, maxLength - 3) + "...";
+        }
+
+        private static Color GetStatusColor(InstaReloadOperationStatus status)
+        {
+            switch (status)
+            {
+                case InstaReloadOperationStatus.Compiling:
+                    return new Color(1f, 0.8f, 0.2f);
+                case InstaReloadOperationStatus.Patching:
+                    return new Color(0.9f, 0.6f, 0.2f);
+                case InstaReloadOperationStatus.Succeeded:
+                    return new Color(0.3f, 0.9f, 0.3f);
+                case InstaReloadOperationStatus.Failed:
+                    return new Color(0.9f, 0.4f, 0.4f);
+                default:
+                    return new Color(0.7f, 0.7f, 0.7f);
+            }
         }
     }
 }

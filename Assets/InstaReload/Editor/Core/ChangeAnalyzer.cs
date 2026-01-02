@@ -197,32 +197,55 @@ namespace Nimrita.InstaReload.Editor
         /// </summary>
         public static AnalysisResult Analyze(string filePath)
         {
+            if (!File.Exists(filePath))
+            {
+                return new AnalysisResult
+                {
+                    Type = ChangeType.None,
+                    FilePath = filePath,
+                    Reason = "File does not exist"
+                };
+            }
+
+            try
+            {
+                var sourceCode = File.ReadAllText(filePath);
+                return Analyze(filePath, sourceCode);
+            }
+            catch (Exception ex)
+            {
+                InstaReloadLogger.LogError($"[ChangeAnalyzer] Failed to analyze {Path.GetFileName(filePath)}: {ex.Message}");
+                return new AnalysisResult
+                {
+                    Type = ChangeType.None,
+                    FilePath = filePath,
+                    Reason = $"Analysis failed: {ex.Message}"
+                };
+            }
+        }
+
+        public static AnalysisResult Analyze(string filePath, string sourceCode)
+        {
             lock (_lock)
             {
-                if (!File.Exists(filePath))
+                if (string.IsNullOrWhiteSpace(sourceCode))
                 {
                     return new AnalysisResult
                     {
                         Type = ChangeType.None,
                         FilePath = filePath,
-                        Reason = "File does not exist"
+                        Reason = "File is empty or unreadable"
                     };
                 }
 
                 try
                 {
-                    // Read source code
-                    var sourceCode = File.ReadAllText(filePath);
-
-                    // Compute signature hash (types + method signatures, NOT bodies)
                     var newSignature = ComputeSignatureHash(sourceCode);
 
-                    // Check if we've seen this file before
                     if (!_signatureCache.TryGetValue(filePath, out var oldSignature))
                     {
-                        // First time seeing this file
                         _signatureCache[filePath] = newSignature;
-                        SaveCache(); // Persist immediately
+                        SaveCache();
                         return new AnalysisResult
                         {
                             Type = ChangeType.FirstAnalysis,
@@ -231,12 +254,8 @@ namespace Nimrita.InstaReload.Editor
                         };
                     }
 
-                    // Compare signatures
                     if (oldSignature == newSignature)
                     {
-                        // FAST PATH: Only method bodies changed!
-                        // This is the golden path - happens 90% of the time
-                        // No need to save cache - signature unchanged
                         return new AnalysisResult
                         {
                             Type = ChangeType.MethodBodyOnly,
@@ -245,11 +264,8 @@ namespace Nimrita.InstaReload.Editor
                         };
                     }
 
-                    // SLOW PATH: Structure changed
-                    // For now, any signature change triggers full compilation
-                    // TODO: Could be more granular (detect specific changes)
                     _signatureCache[filePath] = newSignature;
-                    SaveCache(); // Persist immediately
+                    SaveCache();
                     return new AnalysisResult
                     {
                         Type = ChangeType.MethodSignatureChanged,
@@ -297,37 +313,82 @@ namespace Nimrita.InstaReload.Editor
         {
             var signatures = new List<string>();
             var lines = sourceCode.Split('\n');
+            var typeDepths = new Stack<int>();
+            var braceDepth = 0;
+            var methodDepth = -1;
+            var pendingMethod = false;
+            var pendingType = false;
+            var inBlockComment = false;
 
-            foreach (var line in lines)
+            foreach (var rawLine in lines)
             {
-                var trimmed = line.Trim();
-
-                // Skip comments and empty lines
-                if (string.IsNullOrWhiteSpace(trimmed) ||
-                    trimmed.StartsWith("//") ||
-                    trimmed.StartsWith("/*") ||
-                    trimmed.StartsWith("*"))
-                    continue;
-
-                // Detect class/struct/interface declarations
-                if (IsTypeDeclaration(trimmed))
+                var sanitized = StripComments(rawLine, ref inBlockComment);
+                if (string.IsNullOrWhiteSpace(sanitized))
                 {
-                    signatures.Add(NormalizeSignature(trimmed));
+                    braceDepth = UpdateBraceDepth(sanitized, braceDepth);
                     continue;
                 }
 
-                // Detect method declarations (public/private/protected + return type + name + params)
-                if (IsMethodDeclaration(trimmed))
+                var trimmed = sanitized.Trim();
+                var currentDepth = braceDepth;
+
+                if (pendingType && trimmed.Contains("{"))
                 {
-                    signatures.Add(NormalizeSignature(trimmed));
-                    continue;
+                    typeDepths.Push(currentDepth + 1);
+                    pendingType = false;
                 }
 
-                // Detect field/property declarations
-                if (IsFieldOrPropertyDeclaration(trimmed))
+                if (pendingMethod && trimmed.Contains("{"))
                 {
-                    signatures.Add(NormalizeSignature(trimmed));
-                    continue;
+                    methodDepth = currentDepth + 1;
+                    pendingMethod = false;
+                }
+
+                if (methodDepth < 0)
+                {
+                    if (IsTypeDeclaration(trimmed))
+                    {
+                        signatures.Add(NormalizeSignature(trimmed));
+                        if (trimmed.Contains("{"))
+                        {
+                            typeDepths.Push(currentDepth + 1);
+                        }
+                        else
+                        {
+                            pendingType = true;
+                        }
+                    }
+                    else if (IsInTypeScope(typeDepths, currentDepth))
+                    {
+                        if (IsMethodDeclaration(trimmed))
+                        {
+                            signatures.Add(NormalizeSignature(trimmed));
+                            if (trimmed.Contains("{"))
+                            {
+                                methodDepth = currentDepth + 1;
+                            }
+                            else
+                            {
+                                pendingMethod = true;
+                            }
+                        }
+                        else if (IsFieldOrPropertyDeclaration(trimmed))
+                        {
+                            signatures.Add(NormalizeSignature(trimmed));
+                        }
+                    }
+                }
+
+                braceDepth = UpdateBraceDepth(trimmed, braceDepth);
+
+                if (methodDepth >= 0 && braceDepth < methodDepth)
+                {
+                    methodDepth = -1;
+                }
+
+                while (typeDepths.Count > 0 && braceDepth < typeDepths.Peek())
+                {
+                    typeDepths.Pop();
                 }
             }
 
@@ -346,32 +407,111 @@ namespace Nimrita.InstaReload.Editor
 
         private static bool IsMethodDeclaration(string line)
         {
-            // Methods have: access modifier + return type + name + (
-            return (line.Contains("(") &&
-                   (line.Contains("void ") ||
-                    line.Contains("int ") ||
-                    line.Contains("bool ") ||
-                    line.Contains("string ") ||
-                    line.Contains("float ") ||
-                    line.Contains("public ") ||
-                    line.Contains("private ") ||
-                    line.Contains("protected ") ||
-                    line.Contains("internal ")) &&
-                   !line.Contains("=") && // Not a lambda or assignment
-                   !line.EndsWith(";")) // Not a forward declaration
-                   && line.Contains(")"); // Has closing paren
+            if (!line.Contains("(") || !line.Contains(")"))
+            {
+                return false;
+            }
+
+            if (line.Contains("=") || line.EndsWith(";"))
+            {
+                return false;
+            }
+
+            if (line.Contains("=>") ||
+                line.Contains("if ") ||
+                line.Contains("for ") ||
+                line.Contains("while ") ||
+                line.Contains("switch "))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         private static bool IsFieldOrPropertyDeclaration(string line)
         {
-            // Fields/properties have type declarations
             return (line.Contains(" get;") ||
                     line.Contains(" set;") ||
                     (line.Contains(";") &&
-                     (line.Contains("public ") ||
-                      line.Contains("private ") ||
-                      line.Contains("protected ")) &&
-                     !line.Contains("("))); // Not a method
+                     !line.Contains("(") &&
+                     !line.Contains("=>")));
+        }
+
+        private static bool IsInTypeScope(Stack<int> typeDepths, int currentDepth)
+        {
+            return typeDepths.Count > 0 && currentDepth == typeDepths.Peek();
+        }
+
+        private static int UpdateBraceDepth(string line, int depth)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                return depth;
+            }
+
+            var openCount = CountChar(line, '{');
+            var closeCount = CountChar(line, '}');
+            return Math.Max(0, depth + openCount - closeCount);
+        }
+
+        private static int CountChar(string line, char target)
+        {
+            var count = 0;
+            for (int i = 0; i < line.Length; i++)
+            {
+                if (line[i] == target)
+                {
+                    count++;
+                }
+            }
+            return count;
+        }
+
+        private static string StripComments(string line, ref bool inBlockComment)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                return string.Empty;
+            }
+
+            var result = new StringBuilder();
+            var index = 0;
+            while (index < line.Length)
+            {
+                if (inBlockComment)
+                {
+                    var end = line.IndexOf("*/", index, StringComparison.Ordinal);
+                    if (end < 0)
+                    {
+                        return result.ToString();
+                    }
+                    inBlockComment = false;
+                    index = end + 2;
+                    continue;
+                }
+
+                var lineComment = line.IndexOf("//", index, StringComparison.Ordinal);
+                var blockComment = line.IndexOf("/*", index, StringComparison.Ordinal);
+                if (blockComment >= 0 && (lineComment < 0 || blockComment < lineComment))
+                {
+                    result.Append(line.Substring(index, blockComment - index));
+                    inBlockComment = true;
+                    index = blockComment + 2;
+                    continue;
+                }
+
+                if (lineComment >= 0)
+                {
+                    result.Append(line.Substring(index, lineComment - index));
+                    break;
+                }
+
+                result.Append(line.Substring(index));
+                break;
+            }
+
+            return result.ToString();
         }
 
         /// <summary>

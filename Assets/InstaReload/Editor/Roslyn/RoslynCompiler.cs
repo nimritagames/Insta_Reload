@@ -292,7 +292,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return new CompilationResult
                 {
                     Success = false,
-                    ErrorMessage = "Roslyn not initialized"
+                    ErrorMessage = "Roslyn not initialized",
+                    UsedFastPath = useFastPath
                 };
             }
 
@@ -307,30 +308,35 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return new CompilationResult
                 {
                     Success = false,
-                    ErrorMessage = $"Failed to read file: {ex.Message}"
+                    ErrorMessage = $"Failed to read file: {ex.Message}",
+                    UsedFastPath = useFastPath
                 };
             }
         }
 
-        public static CompilationResult CompileSource(string sourceCode, string assemblyName = "DynamicAssembly", string fileName = "source.cs", bool useFastPath = false)
+        public static CompilationResult CompileSource(string sourceCode, string assemblyName = "DynamicAssembly", string fileName = "source.cs", bool useFastPath = false, bool emitLogs = true)
         {
             if (!_initialized)
             {
                 return new CompilationResult
                 {
                     Success = false,
-                    ErrorMessage = "Roslyn not available"
+                    ErrorMessage = "Roslyn not available",
+                    UsedFastPath = useFastPath
                 };
             }
 
             var startTime = DateTime.Now;
             var step1Time = DateTime.Now;
+            double parseTime = 0;
+            double addTreeTime = 0;
+            double emitTime = 0;
 
             try
             {
                 // 1. Parse source code into SyntaxTree
                 object syntaxTree = ParseText(sourceCode);
-                var parseTime = (DateTime.Now - step1Time).TotalMilliseconds;
+                parseTime = (DateTime.Now - step1Time).TotalMilliseconds;
 
                 if (syntaxTree == null)
                 {
@@ -338,7 +344,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     {
                         Success = false,
                         ErrorMessage = "Failed to parse syntax tree",
-                        CompilationTime = (DateTime.Now - startTime).TotalMilliseconds
+                        CompilationTime = (DateTime.Now - startTime).TotalMilliseconds,
+                        ParseTimeMs = parseTime,
+                        AddTreeTimeMs = addTreeTime,
+                        EmitTimeMs = emitTime,
+                        UsedFastPath = useFastPath
                     };
                 }
 
@@ -346,7 +356,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 var step2Time = DateTime.Now;
                 var baseCompilation = useFastPath ? _fastPathCompilation : _baseCompilation;
                 object compilation = AddSyntaxTrees(baseCompilation, new[] { syntaxTree });
-                var addTreeTime = (DateTime.Now - step2Time).TotalMilliseconds;
+                addTreeTime = (DateTime.Now - step2Time).TotalMilliseconds;
 
                 if (compilation == null)
                 {
@@ -354,7 +364,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     {
                         Success = false,
                         ErrorMessage = "Failed to add syntax trees",
-                        CompilationTime = (DateTime.Now - startTime).TotalMilliseconds
+                        CompilationTime = (DateTime.Now - startTime).TotalMilliseconds,
+                        ParseTimeMs = parseTime,
+                        AddTreeTimeMs = addTreeTime,
+                        EmitTimeMs = emitTime,
+                        UsedFastPath = useFastPath
                     };
                 }
 
@@ -364,21 +378,27 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 {
                     // Fast path uses Debug optimization level set during initialization
                     object emitResult = Emit(compilation, ms);
-                    var emitTime = (DateTime.Now - step3Time).TotalMilliseconds;
+                    emitTime = (DateTime.Now - step3Time).TotalMilliseconds;
                     bool success = (bool)_emitResultType.GetProperty("Success").GetValue(emitResult);
 
                     var result = new CompilationResult
                     {
                         Success = success,
-                        CompilationTime = (DateTime.Now - startTime).TotalMilliseconds
+                        CompilationTime = (DateTime.Now - startTime).TotalMilliseconds,
+                        ParseTimeMs = parseTime,
+                        AddTreeTimeMs = addTreeTime,
+                        EmitTimeMs = emitTime,
+                        UsedFastPath = useFastPath
                     };
 
                     if (success)
                     {
                         result.CompiledAssembly = ms.ToArray();
-                        var pathType = useFastPath ? "FAST PATH" : "Normal";
-                        InstaReloadLogger.Log($"[Roslyn] ✓ {pathType} compiled in {result.CompilationTime:F0}ms ({result.CompiledAssembly.Length} bytes)");
-                        InstaReloadLogger.Log($"[Roslyn]   → Parse: {parseTime:F0}ms | AddTree: {addTreeTime:F0}ms | Emit: {emitTime:F0}ms");
+                        result.OutputSize = result.CompiledAssembly.Length;
+                        if (emitLogs)
+                        {
+                            LogCompilationResult(result);
+                        }
                     }
                     else
                     {
@@ -398,9 +418,25 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 {
                     Success = false,
                     ErrorMessage = $"Compilation exception: {ex.Message}",
-                    CompilationTime = (DateTime.Now - startTime).TotalMilliseconds
+                    CompilationTime = (DateTime.Now - startTime).TotalMilliseconds,
+                    ParseTimeMs = parseTime,
+                    AddTreeTimeMs = addTreeTime,
+                    EmitTimeMs = emitTime,
+                    UsedFastPath = useFastPath
                 };
             }
+        }
+
+        internal static void LogCompilationResult(CompilationResult result)
+        {
+            if (result == null || !result.Success)
+            {
+                return;
+            }
+
+            var pathType = result.UsedFastPath ? "FAST PATH" : "Normal";
+            InstaReloadLogger.Log($"[Roslyn] ✓ {pathType} compiled in {result.CompilationTime:F0}ms ({result.OutputSize} bytes)");
+            InstaReloadLogger.Log($"[Roslyn]   → Parse: {result.ParseTimeMs:F0}ms | AddTree: {result.AddTreeTimeMs:F0}ms | Emit: {result.EmitTimeMs:F0}ms");
         }
 
         private static bool EnsureRoslynLoaded()
@@ -866,6 +902,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         public byte[] CompiledAssembly { get; set; }
         public string ErrorMessage { get; set; }
         public double CompilationTime { get; set; }
+        public double ParseTimeMs { get; set; }
+        public double AddTreeTimeMs { get; set; }
+        public double EmitTimeMs { get; set; }
+        public int OutputSize { get; set; }
+        public bool UsedFastPath { get; set; }
         public List<string> Errors { get; set; } = new List<string>();
         public List<string> Warnings { get; set; } = new List<string>();
     }

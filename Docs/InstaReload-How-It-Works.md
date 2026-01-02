@@ -32,6 +32,7 @@ bridge in `Assets/InstaReload/RuntimeBridge/`.
 - Unity entry points are detoured to stable trampolines.
 - New or rewritten methods are registered with the dispatcher.
 - Existing methods get IL body replacement via `ILHook`.
+- Field accesses to missing runtime fields are rewritten to `HotReloadFieldStore`.
 
 6) Runtime invocation
 - Trampolines call `HotReloadBridge.Invoke` -> `HotReloadDispatcher.Invoke`.
@@ -67,6 +68,7 @@ Key behavior:
   `CompilationPipeline.GetAssemblies()`, then falls back to AppDomain lookup.
 - Writes the compiled bytes to a temp dll so Mono.Cecil can read it.
 - Reuses a per-assembly `InstaReloadPatcher`.
+- Invokes hot reload callbacks after patches are applied.
 
 ### ChangeAnalyzer (Editor)
 File: `Assets/InstaReload/Editor/Core/ChangeAnalyzer.cs`
@@ -183,6 +185,20 @@ Purpose:
 - The patcher resolves this method from the runtime assembly to avoid
   metadata reference mismatch in IL rewriting.
 
+### HotReloadFieldStore (Runtime)
+File: `Assets/InstaReload/Runtime/HotReloadFieldStore.cs`
+
+Purpose:
+- Provide a backing store for fields added or reshaped at runtime.
+- When a compiled field does not exist in the runtime type, the patcher rewrites
+  field loads/stores to call the field store instead of the real field.
+
+Behavior:
+- Instance fields are stored per-instance in a `ConditionalWeakTable`.
+- Static fields are stored per-field key in a shared dictionary.
+- Missing value-type fields return a default value (`Activator.CreateInstance`).
+- Field initializers are not re-run for existing instances.
+
 ### HotReloadBehaviour (Runtime)
 File: `Assets/InstaReload/Runtime/HotReloadBehaviour.cs`
 
@@ -217,6 +233,30 @@ Coverage:
 - Messages not in the fallback map still require a restart or HotReloadBehaviour/IL weaving.
 - Initialization/destruction messages (`Awake`, `Start`, `OnEnable`, `OnDisable`, `OnDestroy`)
   are intentionally excluded from fallback dispatch to avoid replaying one-time setup.
+
+### Hot reload callbacks (Runtime attributes)
+File: `Assets/InstaReload/Runtime/HotReloadPatchCallbacks.cs`
+
+Purpose:
+- Allow code to react immediately when hot reload patches are applied.
+
+Attributes:
+- `[InvokeOnHotReload]` -> invoked after any patch batch is applied.
+- `[InvokeOnHotReloadLocal]` -> invoked only when the method itself was patched.
+
+Supported signatures:
+- `void MethodName()` (no parameters)
+- `void MethodName(IReadOnlyList<HotReloadMethodPatch> patches)` (global callbacks)
+- `void MethodName(HotReloadMethodPatch patch)` (local callbacks)
+
+Instance callbacks:
+- Instance callbacks are only supported for `UnityEngine.Object` types (MonoBehaviour or ScriptableObject).
+- If no live instances exist, the callback is skipped and a warning is logged.
+
+Patch payload:
+- `HotReloadMethodPatch.MethodKey` is the stable method signature key.
+- `HotReloadMethodPatch.Kind` indicates whether the method was patched, dispatched, or trampoline-backed.
+- Callbacks also fire when cached patches are replayed on Play Mode entry.
 
 ### Logging and settings (Editor)
 Files:
@@ -258,11 +298,13 @@ Fast path:
 Slow path:
 - `ChangeAnalyzer` returns structural change.
 - `RoslynCompiler` uses Release optimization.
-- `InstaReloadPatcher` validates type and field compatibility.
+- `InstaReloadPatcher` validates type compatibility and method removals; field differences are handled via the field store.
 
 ## Limitations (current behavior)
 
-- No runtime type additions or field changes without exiting Play Mode.
+- No runtime type additions without exiting Play Mode.
+- Field changes use `HotReloadFieldStore`, but initializers do not re-run for existing instances.
+- Missing-field address access (`ldflda`/`ldsflda`) is not supported and will skip patching that method.
 - Removed methods are not allowed during Play Mode.
 - New methods are only callable through dispatch (trampolines or rewritten calls).
 - Generic methods and byref or pointer parameters are not supported in dispatch.
@@ -277,5 +319,7 @@ Slow path:
 - `Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs`
 - `Assets/InstaReload/Runtime/HotReloadDispatcher.cs`
 - `Assets/InstaReload/RuntimeBridge/HotReloadBridge.cs`
+- `Assets/InstaReload/Runtime/HotReloadFieldStore.cs`
+- `Assets/InstaReload/Runtime/HotReloadPatchCallbacks.cs`
 - `Assets/InstaReload/Editor/Core/InstaReloadLogger.cs`
 - `Assets/InstaReload/Editor/Settings/InstaReloadSettings.cs`
