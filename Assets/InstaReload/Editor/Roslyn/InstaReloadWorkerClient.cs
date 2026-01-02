@@ -1,12 +1,12 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -31,14 +31,9 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         private const int ConnectTimeoutMs = 5000;
         private const int MaxMessageSize = 64 * 1024 * 1024;
 
-        private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            WriteIndented = false
-        };
-
         private static readonly object Sync = new object();
         private static readonly SemaphoreSlim RequestLock = new SemaphoreSlim(1, 1);
+        private static readonly ConcurrentQueue<Action> MainThreadQueue = new ConcurrentQueue<Action>();
 
         private static InstaReloadWorkerState _state = InstaReloadWorkerState.Disabled;
         private static string _lastError = string.Empty;
@@ -49,6 +44,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         private static CompileContext _desiredContext;
         private static string _activeContextHash;
         private static bool _shutdownRequested;
+        private static int _mainThreadId;
+        private static bool _mainThreadHooked;
 
         internal static InstaReloadWorkerState State => _state;
         internal static string LastError => _lastError;
@@ -56,6 +53,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
         internal static bool EnsureReady()
         {
+            EnsureMainThreadPump();
+
             var settings = InstaReloadSettings.GetOrCreateSettings();
             if (settings == null || !settings.Enabled || !settings.UseExternalWorker)
             {
@@ -126,12 +125,12 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 var request = new CompileRequest
                 {
-                    Type = "compile",
-                    RequestId = Guid.NewGuid().ToString("N"),
-                    AssemblyName = assemblyName,
-                    FileName = fileName,
-                    SourceCode = sourceCode,
-                    IsFastPath = isFastPath
+                    type = "compile",
+                    requestId = Guid.NewGuid().ToString("N"),
+                    assemblyName = assemblyName,
+                    fileName = fileName,
+                    sourceCode = sourceCode,
+                    isFastPath = isFastPath
                 };
 
                 await WriteMessageAsync(_stream, request).ConfigureAwait(false);
@@ -159,7 +158,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     };
                 }
 
-                var response = JsonSerializer.Deserialize<CompileResponse>(responseJson, JsonOptions);
+                var response = JsonUtility.FromJson<CompileResponse>(responseJson);
                 return BuildCompilationResult(response, isFastPath);
             }
             catch (Exception ex)
@@ -272,10 +271,10 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 var stream = client.GetStream();
                 var initRequest = new InitRequest
                 {
-                    Type = "init",
-                    ProtocolVersion = ProtocolVersion,
-                    References = context.References,
-                    Defines = context.Defines
+                    type = "init",
+                    protocolVersion = ProtocolVersion,
+                    references = context.References,
+                    defines = context.Defines
                 };
 
                 await WriteMessageAsync(stream, initRequest).ConfigureAwait(false);
@@ -286,10 +285,10 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     return;
                 }
 
-                var initResponse = JsonSerializer.Deserialize<InitResponse>(initJson, JsonOptions);
-                if (initResponse == null || !initResponse.Success)
+                var initResponse = JsonUtility.FromJson<InitResponse>(initJson);
+                if (initResponse == null || !initResponse.success)
                 {
-                    SetState(InstaReloadWorkerState.Failed, initResponse?.Error ?? "Worker init failed");
+                    SetState(InstaReloadWorkerState.Failed, initResponse?.error ?? "Worker init failed");
                     return;
                 }
 
@@ -550,11 +549,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
 
             byte[] assemblyBytes = null;
-            if (response.Success && !string.IsNullOrEmpty(response.AssemblyBytes))
+            if (response.success && !string.IsNullOrEmpty(response.assemblyBytes))
             {
                 try
                 {
-                    assemblyBytes = Convert.FromBase64String(response.AssemblyBytes);
+                    assemblyBytes = Convert.FromBase64String(response.assemblyBytes);
                 }
                 catch
                 {
@@ -564,17 +563,17 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
             return new CompilationResult
             {
-                Success = response.Success,
+                Success = response.success,
                 CompiledAssembly = assemblyBytes,
-                ErrorMessage = response.ErrorMessage,
-                CompilationTime = response.CompilationTimeMs,
-                ParseTimeMs = response.ParseTimeMs,
-                AddTreeTimeMs = response.AddTreeTimeMs,
-                EmitTimeMs = response.EmitTimeMs,
-                OutputSize = response.OutputSize,
-                UsedFastPath = response.IsFastPath,
-                Errors = response.Errors ?? new List<string>(),
-                Warnings = response.Warnings ?? new List<string>()
+                ErrorMessage = response.errorMessage,
+                CompilationTime = response.compilationTimeMs,
+                ParseTimeMs = response.parseTimeMs,
+                AddTreeTimeMs = response.addTreeTimeMs,
+                EmitTimeMs = response.emitTimeMs,
+                OutputSize = response.outputSize,
+                UsedFastPath = response.isFastPath,
+                Errors = response.errors ?? new List<string>(),
+                Warnings = response.warnings ?? new List<string>()
             };
         }
 
@@ -582,18 +581,13 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         {
             try
             {
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.TryGetProperty("type", out var typeElement))
-                {
-                    return typeElement.GetString();
-                }
+                var envelope = JsonUtility.FromJson<MessageEnvelope>(json);
+                return envelope?.type;
             }
             catch
             {
                 return null;
             }
-
-            return null;
         }
 
         private static async Task<string> ReadMessageAsync(NetworkStream stream)
@@ -623,7 +617,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
         private static async Task WriteMessageAsync(NetworkStream stream, object message)
         {
-            var json = JsonSerializer.Serialize(message, JsonOptions);
+            var json = JsonUtility.ToJson(message);
             var payload = Encoding.UTF8.GetBytes(json);
             var lengthBuffer = new byte[4];
             BinaryPrimitives.WriteInt32LittleEndian(lengthBuffer, payload.Length);
@@ -654,6 +648,17 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             _state = state;
             _lastError = error ?? string.Empty;
 
+            if (IsMainThread())
+            {
+                UpdateMetricsForState(state);
+                return;
+            }
+
+            EnqueueMainThread(() => UpdateMetricsForState(state));
+        }
+
+        private static void UpdateMetricsForState(InstaReloadWorkerState state)
+        {
             if (state == InstaReloadWorkerState.Connected)
             {
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Worker connected");
@@ -673,6 +678,48 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             else if (state == InstaReloadWorkerState.Failed)
             {
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Failed, "Worker failed");
+            }
+        }
+
+        private static void EnsureMainThreadPump()
+        {
+            if (_mainThreadHooked)
+            {
+                return;
+            }
+
+            _mainThreadHooked = true;
+            _mainThreadId = Thread.CurrentThread.ManagedThreadId;
+            EditorApplication.update += PumpMainThreadQueue;
+        }
+
+        private static bool IsMainThread()
+        {
+            return _mainThreadId != 0 && Thread.CurrentThread.ManagedThreadId == _mainThreadId;
+        }
+
+        private static void EnqueueMainThread(Action action)
+        {
+            if (action == null)
+            {
+                return;
+            }
+
+            MainThreadQueue.Enqueue(action);
+        }
+
+        private static void PumpMainThreadQueue()
+        {
+            while (MainThreadQueue.TryDequeue(out var action))
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    InstaReloadLogger.LogWarning($"[Worker] Main-thread callback failed: {ex.Message}");
+                }
             }
         }
 
@@ -704,46 +751,56 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             public string WorkerDllPath { get; }
         }
 
+        [Serializable]
+        private sealed class MessageEnvelope
+        {
+            public string type;
+        }
+
+        [Serializable]
         private sealed class InitRequest
         {
-            public string Type { get; set; }
-            public int ProtocolVersion { get; set; }
-            public List<string> References { get; set; } = new List<string>();
-            public List<string> Defines { get; set; } = new List<string>();
+            public string type;
+            public int protocolVersion;
+            public List<string> references = new List<string>();
+            public List<string> defines = new List<string>();
         }
 
+        [Serializable]
         private sealed class InitResponse
         {
-            public string Type { get; set; }
-            public bool Success { get; set; }
-            public string Error { get; set; }
+            public string type;
+            public bool success;
+            public string error;
         }
 
+        [Serializable]
         private sealed class CompileRequest
         {
-            public string Type { get; set; }
-            public string RequestId { get; set; }
-            public string AssemblyName { get; set; }
-            public string FileName { get; set; }
-            public string SourceCode { get; set; }
-            public bool IsFastPath { get; set; }
+            public string type;
+            public string requestId;
+            public string assemblyName;
+            public string fileName;
+            public string sourceCode;
+            public bool isFastPath;
         }
 
+        [Serializable]
         private sealed class CompileResponse
         {
-            public string Type { get; set; }
-            public string RequestId { get; set; }
-            public bool Success { get; set; }
-            public string ErrorMessage { get; set; }
-            public List<string> Errors { get; set; } = new List<string>();
-            public List<string> Warnings { get; set; } = new List<string>();
-            public string AssemblyBytes { get; set; }
-            public double CompilationTimeMs { get; set; }
-            public double ParseTimeMs { get; set; }
-            public double AddTreeTimeMs { get; set; }
-            public double EmitTimeMs { get; set; }
-            public int OutputSize { get; set; }
-            public bool IsFastPath { get; set; }
+            public string type;
+            public string requestId;
+            public bool success;
+            public string errorMessage;
+            public List<string> errors = new List<string>();
+            public List<string> warnings = new List<string>();
+            public string assemblyBytes;
+            public double compilationTimeMs;
+            public double parseTimeMs;
+            public double addTreeTimeMs;
+            public double emitTimeMs;
+            public int outputSize;
+            public bool isFastPath;
         }
     }
 }
