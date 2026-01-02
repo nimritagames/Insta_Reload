@@ -521,15 +521,51 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return;
             }
 
-            var job = _pendingCompileJobs.Dequeue();
+            var job = _pendingCompileJobs.Peek();
+            if (!TryStartCompile(job, out var compileTask))
+            {
+                return;
+            }
+
+            _pendingCompileJobs.Dequeue();
             _activeCompileJob = job;
+            _activeCompileTask = compileTask;
+        }
+
+        private static bool TryStartCompile(CompileJob job, out Task<CompilationResult> compileTask)
+        {
+            compileTask = null;
+            if (job == null)
+            {
+                return false;
+            }
+
+            var settings = InstaReloadSettings.GetOrCreateSettings();
+            if (settings != null && settings.Enabled && settings.UseExternalWorker)
+            {
+                if (!InstaReloadWorkerClient.EnsureReady())
+                {
+                    InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Compiling, "Waiting for worker");
+                    return false;
+                }
+
+                InstaReloadSessionMetrics.RecordCompileStart(job.FilePath, job.IsFastPath);
+                compileTask = InstaReloadWorkerClient.CompileAsync(
+                    job.SourceCode,
+                    job.CompilationAssemblyName,
+                    job.FileName,
+                    job.IsFastPath);
+                return true;
+            }
+
             InstaReloadSessionMetrics.RecordCompileStart(job.FilePath, job.IsFastPath);
-            _activeCompileTask = Task.Run(() => RoslynCompiler.CompileSource(
+            compileTask = Task.Run(() => RoslynCompiler.CompileSource(
                 job.SourceCode,
                 job.CompilationAssemblyName,
                 job.FileName,
                 useFastPath: job.IsFastPath,
                 emitLogs: false));
+            return true;
         }
 
         private static void ProcessActiveCompileJob(bool allowApply)
@@ -628,7 +664,15 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     InstaReloadStatusOverlay.ShowMessage("Compilation failed - see Console", false);
                 }
 
-                InstaReloadLogger.LogWarning("[FileDetector] Unity will compile instead");
+                var settings = InstaReloadSettings.GetOrCreateSettings();
+                if (settings != null && settings.UseExternalWorker)
+                {
+                    InstaReloadLogger.LogWarning("[FileDetector] Worker compilation failed; patch skipped");
+                }
+                else
+                {
+                    InstaReloadLogger.LogWarning("[FileDetector] Unity will compile instead");
+                }
             }
         }
 

@@ -23,7 +23,10 @@ bridge in `Assets/InstaReload/RuntimeBridge/`.
 - If signatures match, the change is body-only and can use the fast path.
 
 4) Compilation
-- `RoslynCompiler` compiles the single changed file into IL bytes.
+- By default, `InstaReloadWorkerClient` sends compile jobs to the external worker
+  (`Tools/InstaReloadWorker`) so Unity stays responsive.
+- If the worker is disabled or unavailable, `RoslynCompiler` compiles the single
+  changed file inside the editor process.
 - Fast path uses Debug optimization; slow path uses Release optimization.
 
 5) Patching and dispatch
@@ -101,6 +104,28 @@ How it works:
 Fast path:
 - Debug optimization avoids expensive emit optimizations.
 - Produces IL quickly and is good enough for hot reload.
+
+### InstaReloadWorkerClient (Editor)
+File: `Assets/InstaReload/Editor/Roslyn/InstaReloadWorkerClient.cs`
+
+Purpose:
+- Manage the external compile worker process and connection.
+- Send compile requests and translate results into hot reload patches.
+
+Key behavior:
+- Builds and starts `Tools/InstaReloadWorker` when enabled.
+- Sends Unity references and define symbols to the worker at init.
+- Queues compile requests and waits for responses over loopback.
+
+### InstaReloadWorker (External Process)
+Project: `Tools/InstaReloadWorker`
+
+Purpose:
+- Compile patch assemblies outside of Unity to avoid editor freezes.
+
+Key behavior:
+- Listens on loopback TCP for init and compile messages.
+- Uses Roslyn to emit IL bytes, diagnostics, and timings.
 
 ### InstaReloadPatcher (Editor)
 File: `Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs`

@@ -195,10 +195,15 @@ namespace Nimrita.InstaReload.Editor
                     HotReloadEntryPointManager.Clear();
                     FileChangeDetector.ReplayCachedPatches();
                     InstaReloadSessionMetrics.Reset();
-                    InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Waiting for changes");
-                }
-                catch (System.Exception ex)
+                InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Waiting for changes");
+
+                if (settings != null && settings.Enabled && settings.UseExternalWorker && settings.AutoStartWorker)
                 {
+                    Roslyn.InstaReloadWorkerClient.EnsureReady();
+                }
+            }
+            catch (System.Exception ex)
+            {
                     InstaReloadLogger.LogWarning($"[Suppressor] Failed to reset dispatcher: {ex.Message}");
                 }
 
@@ -240,6 +245,7 @@ namespace Nimrita.InstaReload.Editor
                 InstaReloadLogger.Log("[Suppressor] ✓ Unity compilation RESTORED");
                 InstaReloadLogger.Log("[Suppressor]   → Processing pending changes...");
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Play Mode ended");
+                Roslyn.InstaReloadWorkerClient.Shutdown();
             }
             catch (System.Exception ex)
             {
