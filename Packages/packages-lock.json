@@ -1,5 +1,11 @@
 {
   "dependencies": {
+    "com.nimrita.harmony": {
+      "version": "file:com.nimrita.harmony",
+      "depth": 0,
+      "source": "embedded",
+      "dependencies": {}
+    },
     "com.unity.collab-proxy": {
       "version": "2.11.2",
       "depth": 0,
