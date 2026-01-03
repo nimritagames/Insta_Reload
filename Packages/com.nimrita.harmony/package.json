@@ -1,0 +1,11 @@
+{
+  "name": "com.nimrita.harmony",
+  "version": "2.4.2",
+  "displayName": "Harmony (Embedded)",
+  "description": "Harmony method patching library (embedded for InstaReload).",
+  "unity": "2022.3",
+  "author": {
+    "name": "pardeike",
+    "url": "https://github.com/pardeike/Harmony"
+  }
+}
