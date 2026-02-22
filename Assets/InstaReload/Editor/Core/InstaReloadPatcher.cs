@@ -1193,7 +1193,37 @@ namespace Nimrita.InstaReload.Editor
 
             if (!updatedFields.SetEquals(runtimeFields))
             {
-                InstaReloadLogger.LogWarning($"[Patcher] Field set changed in {runtimeType.FullName}. Missing fields will use the field store.");
+                // Fields can be added or removed without blocking hot reload.
+                //
+                // ADDED fields: the runtime type has no memory slot for them, so any IL that
+                // reads/writes them gets rewritten by TryRewriteFieldInstruction to call
+                // HotReloadFieldStore instead. Instance fields use ConditionalWeakTable (keyed
+                // by instance), static fields use a plain Dictionary. Both are O(1) and survive
+                // for the rest of the play-mode session.
+                //
+                // REMOVED fields: the runtime type still carries the physical field (we can't
+                // shrink it). Any code in the hot assembly that used to reference the removed
+                // field simply won't compile it anymore, so nothing calls it. Unpatched methods
+                // in OTHER files still compile against the original runtime type and continue to
+                // work normally.
+                var added   = updatedFields.Except(runtimeFields).ToList();
+                var removed = runtimeFields.Except(updatedFields).ToList();
+
+                if (added.Count > 0)
+                {
+                    InstaReloadLogger.Log(InstaReloadLogCategory.Patcher,
+                        $"[Patcher] {runtimeType.Name}: {added.Count} new field(s) → HotReloadFieldStore");
+                    foreach (var f in added)
+                        InstaReloadLogger.LogVerbose(InstaReloadLogCategory.Patcher, $"  + {f}");
+                }
+
+                if (removed.Count > 0)
+                {
+                    InstaReloadLogger.Log(InstaReloadLogCategory.Patcher,
+                        $"[Patcher] {runtimeType.Name}: {removed.Count} removed field(s) — runtime copy retained (no domain reload needed)");
+                    foreach (var f in removed)
+                        InstaReloadLogger.LogVerbose(InstaReloadLogCategory.Patcher, $"  - {f}");
+                }
             }
 
             reason = string.Empty;
@@ -1943,6 +1973,10 @@ namespace Nimrita.InstaReload.Editor
             var il = body.GetILProcessor();
             var instructionMap = new Dictionary<Instruction, Instruction>(updatedMethod.Body.Instructions.Count);
 
+            // Count field rewrites so we can emit a single summary log per method rather
+            // than one log line per opcode. Verbose mode shows each rewritten field name.
+            int fieldStoreRewrites = 0;
+
             foreach (var instruction in updatedMethod.Body.Instructions)
             {
                 var fieldRewrite = TryRewriteFieldInstruction(
@@ -1953,6 +1987,7 @@ namespace Nimrita.InstaReload.Editor
                     out var fieldError);
                 if (fieldRewrite == FieldRewriteResult.Rewritten)
                 {
+                    fieldStoreRewrites++;
                     instructionMap[instruction] = fieldEmitted[0];
                     foreach (var emittedInstruction in fieldEmitted)
                     {
@@ -1978,6 +2013,17 @@ namespace Nimrita.InstaReload.Editor
                 var cloned = CloneInstruction(instruction, targetMethod, context);
                 instructionMap[instruction] = cloned;
                 il.Append(cloned);
+            }
+
+            // Log a summary after cloning so the developer can see that hot-field-store
+            // rewrites happened. One line per method keeps the console readable; verbose
+            // mode shows the full key list (emitted by FieldSetsMatch).
+            if (fieldStoreRewrites > 0)
+            {
+                var typeName  = targetMethod.DeclaringType?.Name ?? "?";
+                var methodName = targetMethod.Name;
+                InstaReloadLogger.LogVerbose(InstaReloadLogCategory.Patcher,
+                    $"[Patcher] {typeName}.{methodName}: {fieldStoreRewrites} hot-field access(es) routed via HotReloadFieldStore");
             }
 
             foreach (var instruction in updatedMethod.Body.Instructions)
@@ -2011,11 +2057,44 @@ namespace Nimrita.InstaReload.Editor
 
         private enum FieldRewriteResult
         {
-            None,
-            Rewritten,
-            Unsupported
+            None,       // field exists in runtime assembly — leave the original opcode as-is
+            Rewritten,  // field is new (not in runtime) — rewrote to HotReloadFieldStore calls
+            Unsupported // new field but rewrite is impossible (e.g. ldflda address-of)
         }
 
+        // Transparently rewrites field access IL for fields that don't exist in the runtime
+        // assembly (new instance or static fields added during hot reload).
+        //
+        // WHY THIS IS NEEDED:
+        //   The runtime type's physical layout is fixed the moment the CLR JITs it. We
+        //   cannot add memory slots to an existing type at runtime. Any `ldfld`/`stfld`
+        //   that references a field offset the CLR doesn't know about would crash.
+        //
+        // HOW IT WORKS:
+        //   We intercept at IL level, not at runtime. When CloneMethodBody encounters a
+        //   field access opcode (ldfld / stfld / ldsfld / stsfld) whose key is ABSENT from
+        //   context.RuntimeFields (the map of fields the runtime type actually has), we
+        //   replace that one opcode with a call sequence into HotReloadFieldStore:
+        //
+        //     ldfld  T Foo::_x      →  call GetInstanceField(instance, key, typeof(T))
+        //     stfld  T Foo::_x      →  call SetInstanceField(instance, key, boxed_value)
+        //     ldsfld T Foo::_y      →  call GetStaticField(key, typeof(T))
+        //     stsfld T Foo::_y      →  call SetStaticField(key, boxed_value)
+        //
+        //   Instance fields use ConditionalWeakTable (data lives as long as the instance).
+        //   Static fields use a plain Dictionary (data lives for the entire play-mode session).
+        //   Both storage strategies are transparent to developer code — they write normal C#
+        //   and the patcher handles the indirection invisibly.
+        //
+        // FIELD KEY FORMAT:
+        //   "DeclaringType.FullName::FieldName:FieldTypeName:instance|static"
+        //   Including the declaring type avoids collisions when two different types have
+        //   fields with the same name. Including the field type prevents collisions between
+        //   fields that share a name but have different types across hot-reload cycles.
+        //
+        // LIMITATION:
+        //   ldflda / ldsflda (take address of field) cannot be rewritten — field-store
+        //   values have no stable memory address. These are blocked and skip the method.
         private static FieldRewriteResult TryRewriteFieldInstruction(
             Instruction instruction,
             MethodDefinition targetMethod,
