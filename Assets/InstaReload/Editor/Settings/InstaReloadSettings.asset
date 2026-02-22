@@ -14,3 +14,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   enabled: 1
   verboseLogging: 1
+  enabledLogLevels: -1
+  enabledLogCategories: -1
+  autoApplyPlayModeSettings: 1
+  useExternalWorker: 1
+  autoStartWorker: 1
+  workerPort: 53530
+  logSettingsVersion: 1
+  settingsVersion: 2
