@@ -287,6 +287,50 @@ namespace Nimrita.InstaReload.Editor
             public MethodInfo TrampolineMethod { get; }
         }
 
+        // Result of CheckCompatibility.
+        //
+        // Why a struct instead of out-params?
+        //   The old IsCompatible had (out string reason) which conflated two concerns:
+        //   "is there a hard blocker?" and "what new types were found?". Mixing those
+        //   into a single out-param makes the call site awkward and the method hard to
+        //   extend. A result struct keeps each concern in its own field, adds no heap
+        //   allocation for the struct itself, and reads cleanly at the call site.
+        //
+        // Why readonly?
+        //   The result is produced once and consumed once. Making it readonly prevents
+        //   accidental mutation and signals intent clearly.
+        private readonly struct CompatibilityResult
+        {
+            // True  → the hot assembly can be applied (may still contain new types).
+            // False → a hard blocker was found (e.g. removed methods); abort patching.
+            public readonly bool IsCompatible;
+
+            // Human-readable reason when IsCompatible is false. Empty otherwise.
+            public readonly string BlockingReason;
+
+            // Types present in the compiled assembly but absent from the runtime assembly.
+            // These are new types the developer added — not a blocker. They will be
+            // registered into HotTypeRegistry after the hot assembly loads (Task 3).
+            // Includes compiler-generated types (closures, async state machines) that
+            // accompany new or changed methods.
+            public readonly IReadOnlyList<string> NewTypeFullNames;
+
+            // Factory: validation passed, here are the new types found (may be empty).
+            public static CompatibilityResult Compatible(IReadOnlyList<string> newTypes)
+                => new CompatibilityResult(true, string.Empty, newTypes ?? (IReadOnlyList<string>)Array.Empty<string>());
+
+            // Factory: a hard structural blocker was found; patching must be aborted.
+            public static CompatibilityResult Incompatible(string reason)
+                => new CompatibilityResult(false, reason, Array.Empty<string>());
+
+            private CompatibilityResult(bool isCompatible, string reason, IReadOnlyList<string> newTypes)
+            {
+                IsCompatible = isCompatible;
+                BlockingReason = reason;
+                NewTypeFullNames = newTypes;
+            }
+        }
+
         private readonly string _assemblyName;
         private readonly Dictionary<string, ILHook> _methodHooks = new Dictionary<string, ILHook>(StringComparer.Ordinal);
         private readonly Dictionary<string, TrampolineHook> _trampolineHooks = new Dictionary<string, TrampolineHook>(StringComparer.Ordinal);
@@ -327,18 +371,10 @@ namespace Nimrita.InstaReload.Editor
                     return CreateFailureResult(Guid.Empty, error);
                 }
 
-                // THE MAGIC: Load compiled assembly so new methods exist at runtime
-                try
-                {
-                    var assemblyBytes = System.IO.File.ReadAllBytes(assemblyPath);
-                    System.Reflection.Assembly.Load(assemblyBytes);
-                    InstaReloadLogger.Log("[Patcher] Compiled assembly loaded for IL extraction");
-                }
-                catch (Exception ex)
-                {
-                    InstaReloadLogger.LogWarning($"Failed to load compiled assembly: {ex.Message}");
-                }
-
+                // Read the compiled assembly's IL structure via Cecil so we can inspect
+                // types and methods before loading anything into the AppDomain.
+                // We parse first, validate second, load third — this way we never pollute
+                // the AppDomain with an assembly that will be rejected by compatibility checks.
                 ModuleDefinition updatedModule = null;
                 try
                 {
@@ -358,30 +394,80 @@ namespace Nimrita.InstaReload.Editor
                 }
                 catch (Exception ex)
                 {
-                    var error = $"Failed to load compiled assembly: {ex.Message}";
+                    var error = $"Failed to read compiled assembly: {ex.Message}";
                     InstaReloadLogger.LogError(InstaReloadLogCategory.Patcher, error);
                     return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                 }
 
                 using (updatedModule)
                 {
-                    // OPTIMIZATION: Skip expensive structural validation on fast path
-                    // ChangeAnalyzer already verified only method bodies changed
+                    // newTypeNamesForRegistry collects types the developer added that don't
+                    // yet exist in the runtime assembly. On the fast path these are always
+                    // empty (ChangeAnalyzer only sends method-body-only changes there).
+                    // On the slow path CheckCompatibility fills this list, and Task 3 will
+                    // read it after the hot assembly loads to register types in HotTypeRegistry.
+                    IReadOnlyList<string> newTypeNamesForRegistry = Array.Empty<string>();
+
                     if (!skipValidation)
                     {
-                        if (!IsCompatible(runtimeAssembly, updatedModule, out var reason))
+                        // Full structural validation — checks for removed methods (hard blocker)
+                        // and collects new types (not a blocker, just needs registration).
+                        var compat = CheckCompatibility(runtimeAssembly, updatedModule);
+                        if (!compat.IsCompatible)
                         {
-                            var error = $"Structural change: {reason}";
+                            var error = $"Structural change: {compat.BlockingReason}";
                             InstaReloadLogger.LogWarning(InstaReloadLogCategory.Patcher, error);
                             InstaReloadLogger.LogWarning(InstaReloadLogCategory.Patcher, "→ Exit Play Mode to apply this change");
                             return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                         }
+
+                        newTypeNamesForRegistry = compat.NewTypeFullNames;
+
+                        if (newTypeNamesForRegistry.Count > 0)
+                        {
+                            InstaReloadLogger.Log($"[Patcher] {newTypeNamesForRegistry.Count} new type(s) detected — registering after hot assembly load");
+                            foreach (var name in newTypeNamesForRegistry)
+                                InstaReloadLogger.LogVerbose($"  + {name}");
+                        }
                     }
                     else
                     {
+                        // Fast path: ChangeAnalyzer already confirmed only method bodies changed,
+                        // so no new types are possible and structural validation can be skipped.
                         InstaReloadLogger.Log("[Patcher] ⚡ Fast path - skipping structural validation (trusted)");
                     }
 
+                    // Load the compiled assembly into the AppDomain AFTER validation so we
+                    // never pollute the AppDomain with a rejected assembly.
+                    // We capture the returned Assembly reference — Task 3 will use it to
+                    // look up new types by full name and register them in HotTypeRegistry.
+                    // Without capturing it here, the reference is lost and we'd have to do
+                    // an expensive AppDomain scan to find it again.
+                    Assembly hotAssembly = null;
+                    try
+                    {
+                        var assemblyBytes = System.IO.File.ReadAllBytes(assemblyPath);
+                        hotAssembly = System.Reflection.Assembly.Load(assemblyBytes);
+                        InstaReloadLogger.Log($"[Patcher] Hot assembly loaded: {hotAssembly.GetName().Name}");
+                    }
+                    catch (Exception ex)
+                    {
+                        // Loading failure is non-fatal for existing method patches —
+                        // IL cloning still works from the Cecil module. But new types
+                        // won't be available, so log a warning instead of hard-failing.
+                        InstaReloadLogger.LogWarning($"[Patcher] Failed to load hot assembly — new types unavailable: {ex.Message}");
+                    }
+
+                    // Register new types BEFORE building the method map so that methods
+                    // on those new types are included in the map for this cycle's patching.
+                    // If we registered after, calls from patched methods into new types
+                    // would fail to resolve at IL-clone time within the same hot reload cycle.
+                    if (hotAssembly != null && newTypeNamesForRegistry.Count > 0)
+                        RegisterNewTypes(hotAssembly, newTypeNamesForRegistry);
+
+                    // BuildRuntimeMethodMap now folds in all types from HotTypeRegistry,
+                    // which covers both types just registered above AND types registered in
+                    // previous hot reload cycles within this session.
                     var runtimeMethods = BuildRuntimeMethodMap(runtimeAssembly);
                     var runtimeMethodTokens = BuildRuntimeMethodTokenMap(runtimeAssembly);
                     var runtimeFields = BuildRuntimeFieldMap(runtimeAssembly);
@@ -768,29 +854,206 @@ namespace Nimrita.InstaReload.Editor
             return fallback;
         }
 
+        // Looks up each new type name in the hot assembly and registers it in HotTypeRegistry.
+        //
+        // WHY A SEPARATE METHOD:
+        //   The registration loop needs a compiler-generated type fallback (linear scan)
+        //   because the C# compiler mangles names like "<>c__DisplayClass3_0" in ways that
+        //   don't always round-trip through Assembly.GetType(). Isolating that logic here
+        //   keeps ApplyAssembly readable and lets us reason about registration in one place.
+        //
+        // WHY WE USE NORMALIZED NAMES AS KEYS:
+        //   Cecil uses '/' as the nested-type separator; reflection uses '+'. NormalizeTypeName
+        //   converts '/' → '+' before names reach this method, so Assembly.GetType() works
+        //   directly with the key — no extra conversion needed here.
+        private static void RegisterNewTypes(Assembly hotAssembly, IReadOnlyList<string> newTypeNames)
+        {
+            foreach (var fullName in newTypeNames)
+            {
+                // Primary lookup: direct by normalized full name.
+                var type = hotAssembly.GetType(fullName);
+
+                if (type == null)
+                {
+                    // Fallback: linear scan for compiler-generated types whose names
+                    // are mangled (e.g. "<MyMethod>d__1", "<>c__DisplayClass2_0").
+                    // These are valid hot types — they carry closures and async state
+                    // machines that accompany new or changed methods.
+                    var allTypes = hotAssembly.GetTypes();
+                    for (int i = 0; i < allTypes.Length; i++)
+                    {
+                        if (NormalizeTypeName(allTypes[i].FullName) == fullName)
+                        {
+                            type = allTypes[i];
+                            break;
+                        }
+                    }
+                }
+
+                if (type == null)
+                {
+                    InstaReloadLogger.LogWarning($"[Patcher] New type '{fullName}' not found in hot assembly — IL references to it will fall back to import");
+                    continue;
+                }
+
+                HotTypeRegistry.Register(fullName, type);
+                InstaReloadLogger.LogVerbose($"[Patcher] Registered new type: {fullName}");
+
+                // If the new type is a MonoBehaviour, register its lifecycle entry points
+                // so the proxy scanner can attach dispatchers to any instances created at
+                // runtime (e.g. via AddComponent). See RegisterMonoBehaviourEntryPoints
+                // for a detailed explanation of why this is needed.
+                RegisterMonoBehaviourEntryPoints(type);
+            }
+        }
+
+        // Builds a lookup map of MethodKey → MethodBase covering:
+        //   1. All types in the original runtime assembly (the compiled project DLL).
+        //   2. All types in HotTypeRegistry — types introduced by previous hot reload
+        //      cycles in this session.
+        //
+        // WHY WE INCLUDE HOT TYPES HERE:
+        //   Each hot reload cycle may introduce new types. A subsequent cycle may patch
+        //   a method that calls into one of those previously-hot types. Without including
+        //   hot types in the method map, CloneInstruction can't resolve those callees
+        //   and IL rewriting silently falls back to importing the Cecil reference, which
+        //   may not bind correctly at runtime. Including them here closes that gap.
+        //
+        // NOTE: Types registered in THIS cycle are added to HotTypeRegistry in
+        //   RegisterNewTypes(), which is called before this method, so they are
+        //   already present in the registry by the time we call HotTypeRegistry.GetAll().
         private static Dictionary<string, MethodBase> BuildRuntimeMethodMap(Assembly runtimeAssembly)
         {
             var map = new Dictionary<string, MethodBase>(StringComparer.Ordinal);
-            foreach (var type in runtimeAssembly.GetTypes())
+
+            // Original runtime assembly types.
+            AddMethodsFromTypes(map, runtimeAssembly.GetTypes());
+
+            // Types introduced by hot reload in previous (and current) cycles.
+            // GetAll() returns a snapshot list so we don't hold the registry lock
+            // while iterating and calling reflection APIs.
+            var hotTypes = HotTypeRegistry.GetAll();
+            if (hotTypes.Count > 0)
             {
-                var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-                foreach (var method in type.GetMethods(flags))
-                {
-                    map[GetMethodKey(method)] = method;
-                }
-
-                foreach (var ctor in type.GetConstructors(flags))
-                {
-                    map[GetMethodKey(ctor)] = ctor;
-                }
-
-                if (type.TypeInitializer != null)
-                {
-                    map[GetMethodKey(type.TypeInitializer)] = type.TypeInitializer;
-                }
+                AddMethodsFromTypes(map, hotTypes);
+                InstaReloadLogger.LogVerbose($"[Patcher] Method map includes {hotTypes.Count} hot type(s) from previous reload cycles");
             }
 
             return map;
+        }
+
+        // Shared helper: adds all methods, constructors, and type initializers from a
+        // collection of types into the method map. Extracted to avoid duplication between
+        // the runtime assembly pass and the hot-type pass above.
+        private static void AddMethodsFromTypes(Dictionary<string, MethodBase> map, IEnumerable<Type> types)
+        {
+            var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            foreach (var type in types)
+            {
+                foreach (var method in type.GetMethods(flags))
+                    map[GetMethodKey(method)] = method;
+
+                foreach (var ctor in type.GetConstructors(flags))
+                    map[GetMethodKey(ctor)] = ctor;
+
+                if (type.TypeInitializer != null)
+                    map[GetMethodKey(type.TypeInitializer)] = type.TypeInitializer;
+            }
+        }
+
+        // Registers Unity lifecycle entry points for a new MonoBehaviour type.
+        //
+        // WHY THIS IS NEEDED FOR NEW TYPES (not just modified ones):
+        //   When the developer adds a new MonoBehaviour class and hot reloads, Unity can
+        //   instantiate it via AddComponent(type) and call its lifecycle methods natively —
+        //   because the hot assembly is a real loaded assembly. That part works without any
+        //   registration.
+        //
+        //   However, two things require explicit registration:
+        //   1. PROXY SCANNER: HotReloadEntryPointManager scans for existing instances of
+        //      registered types every 0.5s and attaches HotReloadEntryPointProxy components.
+        //      If the developer creates an instance from patched code during play mode,
+        //      the scanner will find it and ensure the dispatch chain is attached.
+        //   2. SUBSEQUENT PATCHES: When the developer later edits the new MonoBehaviour's
+        //      lifecycle method, the patcher needs a trampoline on the runtime method.
+        //      The trampoline is installed the first time the method is patched. Registering
+        //      with HotReloadEntryPointManager here means the proxy is already set up, so
+        //      the second-cycle patch can attach its trampoline immediately without waiting
+        //      for the scanner's next tick.
+        //
+        // WHY WE WALK BASE TYPES BY NAME (not via typeof(MonoBehaviour)):
+        //   Using typeof(UnityEngine.MonoBehaviour) creates a hard compile-time dependency
+        //   on the UnityEngine module. Walking the base type chain by name works across all
+        //   Unity versions and doesn't break if the module layout changes.
+        private static void RegisterMonoBehaviourEntryPoints(Type newType)
+        {
+            if (newType == null || !IsMonoBehaviourSubclass(newType))
+                return;
+
+            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            var methods = newType.GetMethods(flags);
+            int registered = 0;
+
+            foreach (var method in methods)
+            {
+                // Skip generic methods and methods with unsupported signatures early.
+                if (method.IsGenericMethod || method.IsGenericMethodDefinition)
+                    continue;
+
+                if (!FallbackEntryPointsByName.TryGetValue(method.Name, out var signatures))
+                    continue;
+
+                var parameters = method.GetParameters();
+                foreach (var sig in signatures)
+                {
+                    if (sig.ParameterTypes.Length != parameters.Length)
+                        continue;
+
+                    bool matches = true;
+                    for (int p = 0; p < parameters.Length; p++)
+                    {
+                        if (!string.Equals(GetTypeName(parameters[p].ParameterType), sig.ParameterTypes[p], StringComparison.Ordinal))
+                        {
+                            matches = false;
+                            break;
+                        }
+                    }
+
+                    if (!matches)
+                        continue;
+
+                    var methodKey = GetMethodKey(method);
+                    var methodId = GetMethodId(methodKey);
+                    if (HotReloadEntryPointManager.TryRegisterMissingEntryPoint(newType, sig.Kind, methodId))
+                        registered++;
+
+                    break; // matched this method — move to the next method
+                }
+            }
+
+            if (registered > 0)
+                InstaReloadLogger.Log($"[Patcher] New MonoBehaviour '{newType.Name}': registered {registered} Unity entry point(s) for proxy dispatch");
+        }
+
+        // Checks whether a type is a subclass of MonoBehaviour by walking its base type
+        // chain and matching by name. Avoids a hard typeof(MonoBehaviour) dependency.
+        private static bool IsMonoBehaviourSubclass(Type type)
+        {
+            const string monoBehaviourName = "UnityEngine.MonoBehaviour";
+            const string componentName = "UnityEngine.Component";
+
+            var current = type.BaseType;
+            while (current != null)
+            {
+                var name = current.FullName;
+                if (string.Equals(name, monoBehaviourName, StringComparison.Ordinal) ||
+                    string.Equals(name, componentName, StringComparison.Ordinal))
+                    return true;
+
+                current = current.BaseType;
+            }
+
+            return false;
         }
 
         private static IEnumerable<MethodDefinition> GetPatchableMethods(ModuleDefinition module)
@@ -841,44 +1104,57 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
-        private static bool IsCompatible(Assembly runtimeAssembly, ModuleDefinition updatedModule, out string reason)
+        // Checks whether the compiled assembly is structurally compatible with the runtime assembly.
+        //
+        // "Compatible" does NOT mean identical — it means patchable without a domain reload.
+        // Specifically:
+        //   ALLOWED  → new types (collected into NewTypeFullNames for HotTypeRegistry, Task 3)
+        //   ALLOWED  → new methods on existing types (registered via dispatcher)
+        //   ALLOWED  → field set changes on existing types (routed to HotReloadFieldStore)
+        //   BLOCKED  → removed methods on existing types (call sites in runtime would crash)
+        //
+        // Why we only validate types present in the compiled update:
+        //   We compile one file at a time. The compiled assembly contains only the types
+        //   defined in that file — always fewer than the full runtime assembly. Comparing
+        //   the full type sets would always fail, so we only walk the types we compiled.
+        private static CompatibilityResult CheckCompatibility(Assembly runtimeAssembly, ModuleDefinition updatedModule)
         {
-            reason = string.Empty;
-
             var runtimeTypes = runtimeAssembly.GetTypes().ToDictionary(t => t.FullName, t => t);
             var updatedTypes = GetAllTypes(updatedModule)
                 .Where(t => t.Name != "<Module>")
                 .ToList();
 
-            // CRITICAL FIX: When compiling a single file, the updated assembly will have fewer types
-            // than the runtime assembly. We only need to validate the types that ARE in the update.
-            // Don't check if type sets are equal - that will always fail for single-file compilation!
+            // Accumulate new type names rather than blocking on them.
+            // New types are valid — they just need to be registered in HotTypeRegistry
+            // after the hot assembly loads so that patched methods can reference them.
+            // This includes compiler-generated types (closures, async state machines)
+            // that the C# compiler emits alongside new or changed methods.
+            var newTypeNames = new List<string>();
 
             foreach (var updatedType in updatedTypes)
             {
                 var runtimeName = NormalizeTypeName(updatedType.FullName);
                 if (!runtimeTypes.TryGetValue(runtimeName, out var runtimeType))
                 {
-                    // This is a NEW type - it doesn't exist in runtime yet
-                    reason = $"New type added: {runtimeName}";
-                    return false;
+                    // Type is genuinely new — collect it for registration, then keep going.
+                    newTypeNames.Add(runtimeName);
+                    continue;
                 }
 
+                // For existing types, check field and method compatibility.
+                // Field changes are tolerated (routed to HotReloadFieldStore) — FieldSetsMatch
+                // logs a warning but always returns true, so this never blocks.
                 if (!FieldSetsMatch(updatedType, runtimeType, out var fieldReason))
-                {
-                    reason = fieldReason;
-                    return false;
-                }
+                    return CompatibilityResult.Incompatible(fieldReason);
 
+                // Removed methods ARE a hard blocker: existing call sites in the runtime
+                // assembly would call a method that no longer exists and crash. New methods
+                // are fine — they're dispatched dynamically via HotReloadDispatcher.
                 if (!MethodSetsMatch(updatedType, runtimeType, out var methodReason))
-                {
-                    reason = methodReason;
-                    return false;
-                }
+                    return CompatibilityResult.Incompatible(methodReason);
             }
 
-            // All types in the update are compatible with runtime versions
-            return true;
+            return CompatibilityResult.Compatible(newTypeNames);
         }
 
         private static IEnumerable<TypeDefinition> GetAllTypes(ModuleDefinition module)
@@ -2193,18 +2469,35 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
+        // Resolves a Cecil TypeReference to a System.Type from the live runtime.
+        //
+        // Resolution order:
+        //   1. HotTypeRegistry  — O(1), always returns the latest hot-reloaded version.
+        //   2. Runtime assembly — the original compiled project DLL (fast, authoritative).
+        //   3. Type.GetType    — system types (mscorlib, System.*).
+        //   4. AppDomain scan  — all other loaded assemblies (slow, last resort).
+        //
+        // WHY HotTypeRegistry IS CHECKED FIRST (not after the runtime assembly):
+        //   A new type doesn't exist in the original runtime assembly at all, so checking
+        //   there first would always miss and fall through to the AppDomain scan.
+        //   The AppDomain scan is O(loaded assemblies × types per assembly) — expensive.
+        //   Worse, if the same file was hot-reloaded multiple times, multiple assemblies
+        //   with that type name exist in the AppDomain; the scan returns whichever it
+        //   encounters first, which may be a stale version.
+        //   HotTypeRegistry always holds the latest version (Register() overwrites) and
+        //   resolves in O(1). Checking it first avoids both problems.
         private static Type ResolveRuntimeType(TypeReference type, Assembly runtimeAssembly)
         {
             if (type == null)
-            {
                 return null;
-            }
 
             if (type is GenericParameter)
-            {
                 return null;
-            }
 
+            // Structural types (byref, pointer, array) wrap an element type.
+            // Resolve the element first, then re-wrap. We do this before the
+            // name-based lookups below because these types have no FullName entry
+            // in the registry — only their unwrapped element type would be there.
             if (type is ByReferenceType byReferenceType)
             {
                 var elementType = ResolveRuntimeType(byReferenceType.ElementType, runtimeAssembly);
@@ -2225,33 +2518,34 @@ namespace Nimrita.InstaReload.Editor
 
             var normalizedName = NormalizeTypeName(type.FullName);
 
+            // 1. HotTypeRegistry — fastest path for developer-added types.
+            if (HotTypeRegistry.TryGet(normalizedName, out var hotType))
+                return hotType;
+
+            // 2. Original runtime assembly — fastest path for pre-existing project types.
             if (runtimeAssembly != null)
             {
                 var runtimeType = runtimeAssembly.GetType(normalizedName);
                 if (runtimeType != null)
-                {
                     return runtimeType;
-                }
             }
 
+            // 3. System types — unqualified Type.GetType works for mscorlib and System.*.
             var systemType = Type.GetType(normalizedName);
             if (systemType != null)
-            {
                 return systemType;
-            }
 
+            // 4. AppDomain scan — last resort for third-party assemblies not covered above.
+            //    Skips dynamic assemblies (Reflection.Emit outputs) which don't expose
+            //    GetType() in a useful way and would cause exceptions.
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
                 if (assembly.IsDynamic)
-                {
                     continue;
-                }
 
                 var resolved = assembly.GetType(normalizedName);
                 if (resolved != null)
-                {
                     return resolved;
-                }
             }
 
             return null;

@@ -193,6 +193,10 @@ namespace Nimrita.InstaReload.Editor
 
                     HotReloadDispatcher.Clear();
                     HotReloadEntryPointManager.Clear();
+                    // Clear types registered during this session so a fresh play mode
+                    // starts with an empty registry. New types from the previous session
+                    // are no longer valid — the AppDomain will reload on the next enter.
+                    HotTypeRegistry.Clear();
                     FileChangeDetector.ReplayCachedPatches();
                     InstaReloadSessionMetrics.Reset();
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Waiting for changes");
