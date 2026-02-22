@@ -1451,10 +1451,32 @@ namespace Nimrita.InstaReload.Editor
         private static Dictionary<string, FieldInfo> BuildRuntimeFieldMap(Assembly runtimeAssembly)
         {
             var map = new Dictionary<string, FieldInfo>(StringComparer.Ordinal);
+            var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
             foreach (var type in runtimeAssembly.GetTypes())
             {
-                var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
                 foreach (var field in type.GetFields(flags))
+                {
+                    map[GetFieldLookupKey(field)] = field;
+                }
+            }
+
+            // Hot types (brand-new classes added during play mode) must also have their
+            // fields in this map so that field accesses pass through as direct CLR reads/writes
+            // instead of being redirected to HotReloadFieldStore.
+            //
+            // WHY: when 'new PlayerStats()' runs, the CLR calls the hot assembly's .ctor
+            // natively (newobj is not rewritten — only call/callvirt are). That .ctor sets
+            // CLR field slots directly via stfld. If we didn't include hot type fields here,
+            // TryRewriteFieldInstruction would route every subsequent 'ldfld health' to
+            // FieldStore.GetInstanceField — which has nothing — returning default(T) instead
+            // of the value the constructor just wrote. The two sides would be out of sync.
+            //
+            // Existing types with NEW fields are NOT in HotTypeRegistry and are NOT affected
+            // by this loop — their new fields still correctly get the FieldStore path.
+            foreach (var hotType in HotTypeRegistry.GetAll())
+            {
+                foreach (var field in hotType.GetFields(flags))
                 {
                     map[GetFieldLookupKey(field)] = field;
                 }
