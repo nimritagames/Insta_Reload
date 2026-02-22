@@ -1,5 +1,4 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -599,7 +598,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return null;
             }
 
-            int length = BinaryPrimitives.ReadInt32LittleEndian(lengthBuffer);
+            int length = lengthBuffer[0] | (lengthBuffer[1] << 8) | (lengthBuffer[2] << 16) | (lengthBuffer[3] << 24);
             if (length <= 0 || length > MaxMessageSize)
             {
                 return null;
@@ -620,7 +619,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             var json = JsonUtility.ToJson(message);
             var payload = Encoding.UTF8.GetBytes(json);
             var lengthBuffer = new byte[4];
-            BinaryPrimitives.WriteInt32LittleEndian(lengthBuffer, payload.Length);
+            int msgLen = payload.Length;
+            lengthBuffer[0] = (byte)msgLen;
+            lengthBuffer[1] = (byte)(msgLen >> 8);
+            lengthBuffer[2] = (byte)(msgLen >> 16);
+            lengthBuffer[3] = (byte)(msgLen >> 24);
             await stream.WriteAsync(lengthBuffer, 0, lengthBuffer.Length).ConfigureAwait(false);
             await stream.WriteAsync(payload, 0, payload.Length).ConfigureAwait(false);
             await stream.FlushAsync().ConfigureAwait(false);
