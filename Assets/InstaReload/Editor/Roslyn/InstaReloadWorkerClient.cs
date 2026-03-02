@@ -593,7 +593,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         {
             var lengthBuffer = new byte[4];
             int lengthRead = await ReadExactlyAsync(stream, lengthBuffer, 0, lengthBuffer.Length).ConfigureAwait(false);
-            if (lengthRead == 0)
+            if (lengthRead < lengthBuffer.Length)
             {
                 return null;
             }
@@ -606,7 +606,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
             var payload = new byte[length];
             int payloadRead = await ReadExactlyAsync(stream, payload, 0, length).ConfigureAwait(false);
-            if (payloadRead == 0)
+            if (payloadRead < length)
             {
                 return null;
             }

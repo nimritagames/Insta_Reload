@@ -111,9 +111,9 @@ namespace Nimrita.InstaReload.Editor
             var declaringType = method.DeclaringType;
             if (declaringType == null || !typeof(UnityEngine.Object).IsAssignableFrom(declaringType))
             {
-            InstaReloadLogger.LogWarning(InstaReloadLogCategory.General, $"Callbacks: instance callback skipped (no Unity instance): {method.DeclaringType?.FullName}.{method.Name}");
-            return;
-        }
+                InstaReloadLogger.LogWarning(InstaReloadLogCategory.General, $"Callbacks: instance callback skipped (no Unity instance): {method.DeclaringType?.FullName}.{method.Name}");
+                return;
+            }
 
             var targets = Resources.FindObjectsOfTypeAll(declaringType);
             foreach (var target in targets)

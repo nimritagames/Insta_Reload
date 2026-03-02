@@ -13,6 +13,11 @@ namespace Nimrita.InstaReload.Editor.UI
         private static float _messageDuration = 3f;
         private static Color _messageColor = Color.green;
 
+        // Cached textures — avoids creating a new Texture2D every repaint (was leaking thousands).
+        private static Texture2D _badgeBgTexture;
+        private static Texture2D _messageBgTexture;
+        private static Color _cachedMessageBgColor;
+
         static InstaReloadStatusOverlay()
         {
             SceneView.duringSceneGui += OnSceneGUI;
@@ -76,9 +81,12 @@ namespace Nimrita.InstaReload.Editor.UI
                 badgeHeight
             );
 
+            if (_badgeBgTexture == null)
+                _badgeBgTexture = MakeTexture(2, 2, new Color(0.2f, 0.2f, 0.2f, 0.8f));
+
             var boxStyle = new GUIStyle(GUI.skin.box)
             {
-                normal = { background = MakeTexture(2, 2, new Color(0.2f, 0.2f, 0.2f, 0.8f)) },
+                normal = { background = _badgeBgTexture },
                 border = new RectOffset(2, 2, 2, 2)
             };
 
@@ -133,9 +141,20 @@ namespace Nimrita.InstaReload.Editor.UI
             float alpha = Mathf.Clamp01(1f - (elapsed / _messageDuration));
             var bgColor = new Color(_messageColor.r, _messageColor.g, _messageColor.b, alpha * 0.9f);
 
+            // Recreate the message texture only when the color changes (fade steps).
+            // Quantize alpha to reduce rebuilds (~20 steps instead of every repaint).
+            var quantizedColor = new Color(bgColor.r, bgColor.g, bgColor.b, Mathf.Round(bgColor.a * 20f) / 20f);
+            if (_messageBgTexture == null || _cachedMessageBgColor != quantizedColor)
+            {
+                if (_messageBgTexture != null)
+                    Object.DestroyImmediate(_messageBgTexture);
+                _messageBgTexture = MakeTexture(2, 2, bgColor);
+                _cachedMessageBgColor = quantizedColor;
+            }
+
             var boxStyle = new GUIStyle(GUI.skin.box)
             {
-                normal = { background = MakeTexture(2, 2, bgColor) },
+                normal = { background = _messageBgTexture },
                 border = new RectOffset(3, 3, 3, 3)
             };
 

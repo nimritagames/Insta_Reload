@@ -280,8 +280,9 @@ namespace InstaReloadWorker
         {
             var lengthBuffer = new byte[4];
             int lengthRead = await ReadExactlyAsync(stream, lengthBuffer, 0, lengthBuffer.Length).ConfigureAwait(false);
-            if (lengthRead == 0)
+            if (lengthRead < lengthBuffer.Length)
             {
+                // Stream closed mid-header or returned 0 — treat as disconnect.
                 return null;
             }
 
@@ -293,8 +294,9 @@ namespace InstaReloadWorker
 
             var payload = new byte[length];
             int payloadRead = await ReadExactlyAsync(stream, payload, 0, length).ConfigureAwait(false);
-            if (payloadRead == 0)
+            if (payloadRead < length)
             {
+                // Stream closed mid-payload — incomplete message, treat as disconnect.
                 return null;
             }
 

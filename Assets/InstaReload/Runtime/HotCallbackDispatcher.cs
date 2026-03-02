@@ -77,6 +77,11 @@ namespace Nimrita.InstaReload.Runtime
         private static readonly Dictionary<string, Dictionary<string, MethodInfo>> _hotCallbackCache =
             new Dictionary<string, Dictionary<string, MethodInfo>>();
 
+        // Cached MonoBehaviour instances — rebuilt only when hot reload occurs.
+        // Avoids calling FindObjectsOfType every frame (3x per frame for Update/Fixed/Late).
+        private static MonoBehaviour[] _cachedBehaviours = Array.Empty<MonoBehaviour>();
+        private static bool _instanceCacheDirty = true;
+
         #endregion
 
         #region Initialization
@@ -224,11 +229,18 @@ namespace Nimrita.InstaReload.Runtime
         {
             try
             {
-                // Find all active MonoBehaviours
-                var behaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(includeInactive: false);
-
-                foreach (var behaviour in behaviours)
+                // Rebuild the instance cache only when marked dirty (after a hot reload
+                // or the very first frame). This replaces the old FindObjectsOfType call
+                // that ran 3x per frame and was the single biggest perf bottleneck.
+                if (_instanceCacheDirty)
                 {
+                    _cachedBehaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(includeInactive: false);
+                    _instanceCacheDirty = false;
+                }
+
+                for (int i = 0; i < _cachedBehaviours.Length; i++)
+                {
+                    var behaviour = _cachedBehaviours[i];
                     if (behaviour == null || !behaviour.isActiveAndEnabled)
                         continue;
 
@@ -319,6 +331,7 @@ namespace Nimrita.InstaReload.Runtime
         public static void ClearCache()
         {
             _hotCallbackCache.Clear();
+            _instanceCacheDirty = true;
             if (VerboseLogging)
                 Debug.Log("[HotCallbacks] Cache cleared");
         }
