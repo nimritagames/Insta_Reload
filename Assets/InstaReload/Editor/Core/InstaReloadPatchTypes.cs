@@ -5,6 +5,33 @@ using Nimrita.InstaReload;
 
 namespace Nimrita.InstaReload.Editor
 {
+    /// <summary>
+    /// Per-phase timings for one ApplyAssembly call, in milliseconds.
+    ///
+    /// `patch` is now ~76% of total reload latency, and it covers five very different kinds of
+    /// work — file parsing, AppDomain loading, reflection map building, and codegen. Attributing
+    /// it before optimising it is the same discipline that turned the old `queue` number from a
+    /// guess into a fix.
+    ///
+    /// Fields are mutable and filled in as ApplyAssembly progresses, so an early return still
+    /// yields partial (honest) data rather than nothing.
+    /// </summary>
+    internal sealed class PatchPhaseTimings
+    {
+        internal double CecilReadMs;
+        internal double ValidateMs;
+        internal double AssemblyLoadMs;
+        internal double MapBuildMs;
+        internal double HookApplyMs;
+
+        internal string BuildLine()
+        {
+            return
+                $"cecil {CecilReadMs:F0} | validate {ValidateMs:F0} | load {AssemblyLoadMs:F0} | " +
+                $"maps {MapBuildMs:F0} | hooks {HookApplyMs:F0}";
+        }
+    }
+
     internal sealed class PatchApplyResult
     {
         public PatchApplyResult(

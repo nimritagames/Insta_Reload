@@ -354,6 +354,45 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
+        /// <summary>
+        /// Phase breakdown of the most recent ApplyAssembly call. Exposed as state rather than
+        /// threaded through the return value because ApplyAssembly has many early-return paths;
+        /// this way a failed apply still reports how far it got and what that cost.
+        /// Main-thread only, one apply at a time, so a plain field is sufficient.
+        /// </summary>
+        internal PatchPhaseTimings LastPhaseTimings { get; private set; }
+
+        /// <summary>
+        /// Cecil assembly resolver, kept across reloads.
+        ///
+        /// A fresh DefaultAssemblyResolver was built on every ApplyAssembly. Its internal cache
+        /// started empty each time, so every reload re-resolved UnityEngine, mscorlib and friends
+        /// from disk. The search directories are fixed for the editor session, so one resolver
+        /// serves every reload and stays warm. Rebuilt only if the patch directory changes.
+        /// </summary>
+        private static DefaultAssemblyResolver _sharedResolver;
+        private static string _sharedResolverPatchDirectory;
+
+        private static DefaultAssemblyResolver GetSharedResolver(string assemblyPath)
+        {
+            var patchDirectory = System.IO.Path.GetDirectoryName(assemblyPath);
+
+            if (_sharedResolver != null &&
+                string.Equals(_sharedResolverPatchDirectory, patchDirectory, StringComparison.OrdinalIgnoreCase))
+            {
+                return _sharedResolver;
+            }
+
+            var resolver = new DefaultAssemblyResolver();
+            resolver.AddSearchDirectory(patchDirectory);
+            resolver.AddSearchDirectory(UnityEditor.EditorApplication.applicationContentsPath + "/NetStandard/ref/2.1.0");
+            resolver.AddSearchDirectory(UnityEditor.EditorApplication.applicationContentsPath + "/Managed");
+
+            _sharedResolver = resolver;
+            _sharedResolverPatchDirectory = patchDirectory;
+            return resolver;
+        }
+
         internal PatchApplyResult ApplyAssembly(
             string assemblyPath,
             bool skipValidation = false,
@@ -375,21 +414,29 @@ namespace Nimrita.InstaReload.Editor
                 // types and methods before loading anything into the AppDomain.
                 // We parse first, validate second, load third — this way we never pollute
                 // the AppDomain with an assembly that will be rejected by compatibility checks.
+                // Fresh timings per apply. Fields are filled as each phase completes, so the
+                // early-return paths below still leave partial, truthful data behind.
+                var phases = new PatchPhaseTimings();
+                LastPhaseTimings = phases;
+                var phaseWatch = System.Diagnostics.Stopwatch.StartNew();
+
                 ModuleDefinition updatedModule = null;
                 try
                 {
-                    var resolver = new DefaultAssemblyResolver();
-                    resolver.AddSearchDirectory(System.IO.Path.GetDirectoryName(assemblyPath));
-                    resolver.AddSearchDirectory(UnityEditor.EditorApplication.applicationContentsPath + "/NetStandard/ref/2.1.0");
-                    resolver.AddSearchDirectory(UnityEditor.EditorApplication.applicationContentsPath + "/Managed");
-
                     updatedModule = ModuleDefinition.ReadModule(
                         assemblyPath,
                         new ReaderParameters
                         {
                             ReadSymbols = false,
-                            ReadingMode = ReadingMode.Immediate,
-                            AssemblyResolver = resolver
+
+                            // Deferred, not Immediate. Immediate eagerly reads every type and
+                            // method body in the module and resolves its references — for a 3KB
+                            // patch assembly where only a handful of methods are touched, that
+                            // work is thrown away. Measured at ~41ms per reload, over half of
+                            // total hot reload latency.
+                            ReadingMode = ReadingMode.Deferred,
+
+                            AssemblyResolver = GetSharedResolver(assemblyPath)
                         });
                 }
                 catch (Exception ex)
@@ -398,6 +445,9 @@ namespace Nimrita.InstaReload.Editor
                     InstaReloadLogger.LogError(InstaReloadLogCategory.Patcher, error);
                     return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                 }
+
+                phases.CecilReadMs = phaseWatch.Elapsed.TotalMilliseconds;
+                phaseWatch.Restart();
 
                 using (updatedModule)
                 {
@@ -443,6 +493,9 @@ namespace Nimrita.InstaReload.Editor
                     // look up new types by full name and register them in HotTypeRegistry.
                     // Without capturing it here, the reference is lost and we'd have to do
                     // an expensive AppDomain scan to find it again.
+                    phases.ValidateMs = phaseWatch.Elapsed.TotalMilliseconds;
+                    phaseWatch.Restart();
+
                     Assembly hotAssembly = null;
                     try
                     {
@@ -468,6 +521,9 @@ namespace Nimrita.InstaReload.Editor
                     // BuildRuntimeMethodMap now folds in all types from HotTypeRegistry,
                     // which covers both types just registered above AND types registered in
                     // previous hot reload cycles within this session.
+                    phases.AssemblyLoadMs = phaseWatch.Elapsed.TotalMilliseconds;
+                    phaseWatch.Restart();
+
                     var runtimeMethods = BuildRuntimeMethodMap(runtimeAssembly);
                     var runtimeMethodTokens = BuildRuntimeMethodTokenMap(runtimeAssembly);
                     var runtimeFields = BuildRuntimeFieldMap(runtimeAssembly);
@@ -483,6 +539,9 @@ namespace Nimrita.InstaReload.Editor
                         InstaReloadLogger.LogError(InstaReloadLogCategory.Patcher, error);
                         return CreateFailureResult(runtimeAssembly.ManifestModule.ModuleVersionId, error);
                     }
+
+                    phases.MapBuildMs = phaseWatch.Elapsed.TotalMilliseconds;
+                    phaseWatch.Restart();
 
                     lock (_sync)
                     {
@@ -697,6 +756,8 @@ namespace Nimrita.InstaReload.Editor
                                 InstaReloadLogger.Log($"  ... and {newMethodNames.Count - 3} more");
                             }
                         }
+
+                        phases.HookApplyMs = phaseWatch.Elapsed.TotalMilliseconds;
 
                         if (missingEntryPoints.Count > 0)
                         {

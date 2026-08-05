@@ -857,7 +857,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         /// end-to-end breakdown. This total is what "instant" is measured against — the
         /// compile number alone covers a single stage of the pipeline.
         /// </summary>
-        private static void ReportTimeline(ReloadTimeline timeline)
+        private static void ReportTimeline(ReloadTimeline timeline, PatchPhaseTimings patchPhases = null)
         {
             if (timeline == null)
             {
@@ -876,6 +876,15 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             InstaReloadLogger.Log(
                 InstaReloadLogCategory.FileDetector,
                 $"[Timing]   → {sample.BuildBreakdownLine()}");
+
+            // patch dominates the total now, so break it down in place rather than leaving the
+            // next optimisation to guesswork.
+            if (patchPhases != null)
+            {
+                InstaReloadLogger.Log(
+                    InstaReloadLogCategory.FileDetector,
+                    $"[Timing]   → patch: {patchPhases.BuildLine()}");
+            }
         }
 
         private static void RequeueFile(string filePath)
@@ -975,7 +984,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     InstaReloadStatusOverlay.ShowMessage("Hot reload failed - see Console", false);
                 }
 
-                ReportTimeline(timeline);
+                ReportTimeline(timeline, patcher.LastPhaseTimings);
 
                 // Clean up temp file
                 try
