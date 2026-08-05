@@ -388,12 +388,13 @@ namespace Nimrita.InstaReload.Editor.UI
 
             DrawKeyValueRow("1. Debounce", FormatDuration(timing.DebounceMs));
             DrawKeyValueRow("2. Analyze", FormatDuration(timing.AnalyzeMs));
-            DrawKeyValueRow("3. Queue wait", FormatDuration(timing.QueueMs));
-            DrawKeyValueRow("4. Compile", FormatDuration(timing.CompileMs));
-            DrawKeyValueRow("5. Pickup", FormatDuration(timing.PickupMs));
-            DrawKeyValueRow("6. Patch", FormatDuration(timing.PatchMs));
-            DrawKeyValueRow("7. History write", FormatDuration(timing.HistoryMs));
-            DrawKeyValueRow("8. Callbacks", FormatDuration(timing.CallbacksMs));
+            DrawKeyValueRow("3. Assembly lookup", FormatDuration(timing.AssemblyMs));
+            DrawKeyValueRow("4. Queue wait", FormatDuration(timing.QueueMs));
+            DrawKeyValueRow("5. Compile", FormatDuration(timing.CompileMs));
+            DrawKeyValueRow("6. Pickup", FormatDuration(timing.PickupMs));
+            DrawKeyValueRow("7. Patch", FormatDuration(timing.PatchMs));
+            DrawKeyValueRow("8. History write", FormatDuration(timing.HistoryMs));
+            DrawKeyValueRow("9. Callbacks", FormatDuration(timing.CallbacksMs));
             DrawKeyValueRow("Unaccounted", FormatDuration(timing.UnaccountedMs));
             DrawKeyValueRow("Watcher events", timing.WatcherEventCount.ToString());
 

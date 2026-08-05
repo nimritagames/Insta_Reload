@@ -375,7 +375,36 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             TryStartNextCompileJob();
         }
 
+        /// <summary>
+        /// Which assembly owns a given source file. Cached because the underlying
+        /// CompilationPipeline.GetAssemblies() call plus the linear scan over every assembly's
+        /// sourceFiles ran on EVERY save, and a file's owning assembly cannot change without an
+        /// asmdef edit — which triggers a domain reload and clears this dictionary anyway.
+        /// </summary>
+        private static readonly Dictionary<string, string> _assemblyNameByFile =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         private static string GetAssemblyNameForFile(string filePath)
+        {
+            lock (_lock)
+            {
+                if (_assemblyNameByFile.TryGetValue(filePath, out var cached))
+                {
+                    return cached;
+                }
+            }
+
+            var assemblyName = ResolveAssemblyNameForFile(filePath);
+
+            lock (_lock)
+            {
+                _assemblyNameByFile[filePath] = assemblyName;
+            }
+
+            return assemblyName;
+        }
+
+        private static string ResolveAssemblyNameForFile(string filePath)
         {
             try
             {
@@ -513,6 +542,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     if (RoslynCompiler.IsAvailable)
                     {
                         var assemblyName = GetAssemblyNameForFile(file);
+                        timeline.MarkAssemblyResolved();
                         if (string.IsNullOrEmpty(assemblyName))
                         {
                             InstaReloadLogger.LogWarning($"[FileDetector] Could not determine assembly for {Path.GetFileName(file)}");

@@ -57,6 +57,9 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         private static Task _connectTask;
         private static CompileContext _desiredContext;
         private static string _activeContextHash;
+        private static CompileContext _cachedContext;
+        private static string _cachedContextHash;
+        private static int _cachedContextBasePort;
         private static bool _shutdownRequested;
         private static int _mainThreadId;
         private static bool _mainThreadHooked;
@@ -77,14 +80,13 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return false;
             }
 
-            var context = BuildContext(settings);
+            GetOrBuildContext(settings, out var context, out var contextHash);
             if (context == null || context.References.Count == 0)
             {
                 SetState(InstaReloadWorkerState.Failed, "Missing compilation references");
                 return false;
             }
 
-            var contextHash = ComputeContextHash(context);
             bool needsRestart = false;
             lock (Sync)
             {
@@ -220,6 +222,12 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 _shutdownRequested = true;
                 _activeContextHash = null;
+
+                // Shutdown is only reached via explicit user action (settings changed, restart
+                // button) or a detected context change — exactly the cases where the cached
+                // context must be rebuilt rather than reused.
+                _cachedContext = null;
+                _cachedContextHash = null;
             }
 
             try
@@ -556,6 +564,50 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Returns the compile context, building it at most once per domain.
+        ///
+        /// EnsureReady runs on every compile job, and BuildContext is not cheap: reflection
+        /// lookups for Unity's internal compilation defines, a PlayerSettings query, and a
+        /// SHA256 over all reference paths. That was ~half of the per-reload "queue" cost,
+        /// recomputed purely to answer a question whose answer never changes within a domain —
+        /// references and defines only move via edits that force a domain reload, which clears
+        /// these statics. ReferenceResolver already caches its half on the same assumption.
+        ///
+        /// Shutdown() clears it, so an explicit settings change (e.g. worker port) still rebuilds.
+        /// </summary>
+        private static void GetOrBuildContext(
+            InstaReloadSettings settings,
+            out CompileContext context,
+            out string contextHash)
+        {
+            lock (Sync)
+            {
+                // WorkerPort is the one context input reachable without a domain reload — the
+                // window's port field calls EnsureReady directly, without a Shutdown to clear
+                // this cache — so it is re-checked rather than assumed stable.
+                if (_cachedContext != null && _cachedContextBasePort == settings.WorkerPort)
+                {
+                    context = _cachedContext;
+                    contextHash = _cachedContextHash;
+                    return;
+                }
+            }
+
+            var built = BuildContext(settings);
+            var builtHash = ComputeContextHash(built);
+
+            lock (Sync)
+            {
+                _cachedContext = built;
+                _cachedContextHash = builtHash;
+                _cachedContextBasePort = settings.WorkerPort;
+            }
+
+            context = built;
+            contextHash = builtHash;
         }
 
         private static CompileContext BuildContext(InstaReloadSettings settings)

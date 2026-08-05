@@ -29,6 +29,7 @@ namespace Nimrita.InstaReload.Editor
         private double _detectedAtMs = NotStamped;
         private double _debounceEndMs = NotStamped;
         private double _analyzeEndMs = NotStamped;
+        private double _assemblyResolvedMs = NotStamped;
         private double _compileStartMs = NotStamped;
         private double _compileEndMs = NotStamped;
         private double _pickupMs = NotStamped;
@@ -85,6 +86,16 @@ namespace Nimrita.InstaReload.Editor
                 _analyzeEndMs = Now;
                 IsFastPath = isFastPath;
             }
+        }
+
+        /// <summary>
+        /// Closes the span covering the file -> owning-assembly lookup, which is separate from
+        /// the queue wait that follows it. Both used to be lumped into "queue", which hid which
+        /// of the two was actually costing anything.
+        /// </summary>
+        internal void MarkAssemblyResolved()
+        {
+            lock (_sync) { _assemblyResolvedMs = Now; }
         }
 
         internal void MarkCompileStart()
@@ -150,7 +161,10 @@ namespace Nimrita.InstaReload.Editor
                     WatcherEventCount = _watcherEventCount,
                     DebounceMs = SpanUnsafe(_detectedAtMs, _debounceEndMs),
                     AnalyzeMs = SpanUnsafe(_debounceEndMs, _analyzeEndMs),
-                    QueueMs = SpanUnsafe(_analyzeEndMs, _compileStartMs),
+                    AssemblyMs = SpanUnsafe(_analyzeEndMs, _assemblyResolvedMs),
+                    QueueMs = _assemblyResolvedMs >= 0
+                        ? SpanUnsafe(_assemblyResolvedMs, _compileStartMs)
+                        : SpanUnsafe(_analyzeEndMs, _compileStartMs),
                     CompileMs = SpanUnsafe(_compileStartMs, _compileEndMs),
                     PickupMs = SpanUnsafe(_compileEndMs, _pickupMs),
                     PatchMs = SpanUnsafe(_patchStartMs, _patchEndMs),
@@ -163,8 +177,8 @@ namespace Nimrita.InstaReload.Editor
                 // pickup and patch start, temp-file IO, console rendering. If this number is
                 // large, the instrumentation is missing a real cost and should be extended.
                 var accounted =
-                    sample.DebounceMs + sample.AnalyzeMs + sample.QueueMs + sample.CompileMs +
-                    sample.PickupMs + sample.PatchMs + sample.PostPatchMs;
+                    sample.DebounceMs + sample.AnalyzeMs + sample.AssemblyMs + sample.QueueMs +
+                    sample.CompileMs + sample.PickupMs + sample.PatchMs + sample.PostPatchMs;
                 sample.UnaccountedMs = totalMs > accounted ? totalMs - accounted : 0d;
 
                 return sample;
@@ -203,6 +217,7 @@ namespace Nimrita.InstaReload.Editor
         internal int WatcherEventCount { get; set; }
         internal double DebounceMs { get; set; }
         internal double AnalyzeMs { get; set; }
+        internal double AssemblyMs { get; set; }
         internal double QueueMs { get; set; }
         internal double CompileMs { get; set; }
         internal double PickupMs { get; set; }
@@ -238,7 +253,7 @@ namespace Nimrita.InstaReload.Editor
         internal string BuildBreakdownLine()
         {
             return
-                $"debounce {DebounceMs:F0} | analyze {AnalyzeMs:F0} | queue {QueueMs:F0} | " +
+                $"debounce {DebounceMs:F0} | analyze {AnalyzeMs:F0} | assembly {AssemblyMs:F0} | queue {QueueMs:F0} | " +
                 $"compile {CompileMs:F0} | pickup {PickupMs:F0} | patch {PatchMs:F0} | " +
                 $"history {HistoryMs:F0} | callbacks {CallbacksMs:F0} | unaccounted {UnaccountedMs:F0}   " +
                 $"(watcher events: {WatcherEventCount})";
