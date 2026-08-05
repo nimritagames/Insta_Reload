@@ -101,10 +101,11 @@ namespace Nimrita.InstaReload.Editor
             var target = new CloneTarget();
             Debug.Log(
                 $"[CProbe] {phase}\n" +
-                $"   string     = {Invoke(target, typeof(string), "x")}\n" +
-                $"   GameObject = {Invoke(target, typeof(GameObject), null)}\n" +
-                $"   int        = {Invoke(target, typeof(int), 7)}\n" +
-                $"   float      = {Invoke(target, typeof(float), 1.5f)}");
+                $"   string     (ref, shared hook)      = {Invoke(target, typeof(string), "x")}\n" +
+                $"   GameObject (ref, shared hook)      = {Invoke(target, typeof(GameObject), null)}\n" +
+                $"   int        (value, AT call site)   = {Invoke(target, typeof(int), 7)}\n" +
+                $"   float      (value, AT call site)   = {Invoke(target, typeof(float), 1.5f)}\n" +
+                $"   decimal    (value, NO call site)   = {Invoke(target, typeof(decimal), 2.5m)}");
         }
 
         private static string Invoke(CloneTarget target, Type argument, object value)
