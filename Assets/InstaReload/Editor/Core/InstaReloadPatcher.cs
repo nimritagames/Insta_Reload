@@ -2867,14 +2867,11 @@ namespace Nimrita.InstaReload.Editor
             return type.FullName;
         }
 
+        // Delegates to TypeKeyName so this and HotReloadCallbackInvoker cannot drift apart — see
+        // the note there for why a mismatch silently nulled every generic-typed field.
         private static string GetTypeName(Type type)
         {
-            if (type.IsGenericParameter)
-            {
-                return type.Name;
-            }
-
-            return type.FullName ?? type.Name;
+            return TypeKeyName.For(type);
         }
 
         private static string NormalizeTypeName(string name)

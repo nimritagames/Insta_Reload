@@ -6,6 +6,77 @@ using Nimrita.InstaReload;
 namespace Nimrita.InstaReload.Editor
 {
     /// <summary>
+    /// Canonical type name for the keys used to match a Cecil-read assembly against the loaded
+    /// runtime assembly (field keys, method keys, dispatch keys).
+    ///
+    /// WHY THIS EXISTS. Cecil and reflection spell constructed generics differently:
+    ///     Cecil      System.Collections.Generic.List`1&lt;System.Int32&gt;
+    ///     reflection System.Collections.Generic.List`1[[System.Int32, mscorlib, Version=...]]
+    /// so for ANY generic-typed field or parameter the two keys could never match. The field was
+    /// then classified as new, its ldfld/stfld were rewritten to HotReloadFieldStore, and the
+    /// store was empty because the live value sat in the real CLR field — so every List/
+    /// Dictionary/Func field read back null inside a patched method, silently. Methods with
+    /// generic parameters mismatched the same way.
+    ///
+    /// The name is rebuilt STRUCTURALLY from the generic definition plus its arguments, producing
+    /// Cecil's shape by construction rather than by string-munging reflection's output.
+    ///
+    /// Deliberately centralised: two copies of key generation that must agree byte-for-byte is
+    /// precisely the defect above, so the patcher and the callback invoker both call this.
+    /// </summary>
+    internal static class TypeKeyName
+    {
+        internal static string For(Type type)
+        {
+            if (type == null)
+            {
+                return string.Empty;
+            }
+
+            // Open generic parameters (T) carry no useful full name; Cecil emits the bare name.
+            if (type.IsGenericParameter)
+            {
+                return type.Name;
+            }
+
+            // Arrays/byref/pointers must recurse, otherwise an element type that IS generic
+            // (List<int>[], ref List<int>) would fall through to the mismatching FullName.
+            if (type.IsArray)
+            {
+                var rank = type.GetArrayRank();
+                var commas = rank > 1 ? new string(',', rank - 1) : string.Empty;
+                return $"{For(type.GetElementType())}[{commas}]";
+            }
+
+            if (type.IsByRef)
+            {
+                return $"{For(type.GetElementType())}&";
+            }
+
+            if (type.IsPointer)
+            {
+                return $"{For(type.GetElementType())}*";
+            }
+
+            if (type.IsGenericType && !type.IsGenericTypeDefinition)
+            {
+                var definition = type.GetGenericTypeDefinition();
+                var definitionName = definition.FullName ?? definition.Name;
+                var arguments = type.GetGenericArguments();
+                var rendered = new string[arguments.Length];
+                for (int i = 0; i < arguments.Length; i++)
+                {
+                    rendered[i] = For(arguments[i]);
+                }
+
+                return $"{definitionName}<{string.Join(",", rendered)}>";
+            }
+
+            return type.FullName ?? type.Name;
+        }
+    }
+
+    /// <summary>
     /// Per-phase timings for one ApplyAssembly call, in milliseconds.
     ///
     /// `patch` is now ~76% of total reload latency, and it covers five very different kinds of

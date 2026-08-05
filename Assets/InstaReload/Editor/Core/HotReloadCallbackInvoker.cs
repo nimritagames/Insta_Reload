@@ -193,14 +193,12 @@ namespace Nimrita.InstaReload.Editor
             return $"{NormalizeTypeName(typeName)}::{method.Name}`{genericArity}({string.Join(",", parameters)})=>{NormalizeTypeName(returnType)}";
         }
 
+        // Shared with InstaReloadPatcher via TypeKeyName. These two key generators must agree
+        // byte-for-byte; when they diverged on generics, every generic-typed field silently read
+        // back null inside patched methods.
         private static string GetTypeName(Type type)
         {
-            if (type.IsGenericParameter)
-            {
-                return type.Name;
-            }
-
-            return type.FullName ?? type.Name;
+            return TypeKeyName.For(type);
         }
 
         private static string NormalizeTypeName(string name)
