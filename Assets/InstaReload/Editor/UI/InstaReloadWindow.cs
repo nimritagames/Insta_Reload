@@ -355,6 +355,54 @@ namespace Nimrita.InstaReload.Editor.UI
             }
 
             EndCard();
+
+            DrawTimingCard(snapshot);
+        }
+
+        /// <summary>
+        /// End-to-end stage breakdown for the last reload. Compile time alone covers one stage
+        /// of the pipeline; this card shows where the felt latency actually goes.
+        /// </summary>
+        private void DrawTimingCard(InstaReloadSessionSnapshot snapshot)
+        {
+            var timing = snapshot.LastTiming;
+            if (timing == null)
+            {
+                return;
+            }
+
+            EditorGUILayout.Space(12);
+            BeginCard();
+            DrawSectionHeader("End-to-End Timing");
+
+            DrawKeyValueRow(
+                "Total (last)",
+                $"{FormatDuration(timing.TotalMs)} — {timing.FileName} ({FormatCompilePath(timing.IsFastPath ? InstaReloadCompilePath.Fast : InstaReloadCompilePath.Slow)} path)");
+            DrawKeyValueRow(
+                "Total avg/best/worst",
+                $"{FormatDuration(snapshot.TotalAverageMs)} / {FormatDuration(snapshot.TotalBestMs)} / {FormatDuration(snapshot.TotalWorstMs)}  ({snapshot.ReloadCount} reloads)");
+
+            EditorGUILayout.Space(4);
+
+            DrawKeyValueRow("1. Debounce", FormatDuration(timing.DebounceMs));
+            DrawKeyValueRow("2. Analyze", FormatDuration(timing.AnalyzeMs));
+            DrawKeyValueRow("3. Queue wait", FormatDuration(timing.QueueMs));
+            DrawKeyValueRow("4. Compile", FormatDuration(timing.CompileMs));
+            DrawKeyValueRow("5. Pickup", FormatDuration(timing.PickupMs));
+            DrawKeyValueRow("6. Patch", FormatDuration(timing.PatchMs));
+            DrawKeyValueRow("7. History write", FormatDuration(timing.HistoryMs));
+            DrawKeyValueRow("8. Callbacks", FormatDuration(timing.CallbacksMs));
+            DrawKeyValueRow("Unaccounted", FormatDuration(timing.UnaccountedMs));
+            DrawKeyValueRow("Watcher events", timing.WatcherEventCount.ToString());
+
+            if (timing.WatcherEventCount > 1)
+            {
+                EditorGUILayout.HelpBox(
+                    $"This save fired {timing.WatcherEventCount} watcher events. Each one restarts the 300ms debounce window, so the debounce cost above is higher than a single-event save.",
+                    MessageType.Info);
+            }
+
+            EndCard();
         }
 
         private void OnInspectorUpdate()

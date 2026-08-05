@@ -3,12 +3,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Nimrita.InstaReload;
+using UnityEditor;
 using UnityEngine;
 
 namespace Nimrita.InstaReload.Editor
 {
     internal static class HotReloadCallbackInvoker
     {
+        private const BindingFlags HotTypeMethodFlags =
+            BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+
         internal static void InvokeCallbacks(PatchApplyResult result)
         {
             if (result == null || !result.AppliedAny || result.MethodPatches == null || result.MethodPatches.Count == 0)
@@ -140,43 +144,41 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
+        /// <summary>
+        /// Finds every method carrying <paramref name="attributeType"/>.
+        ///
+        /// This used to walk AppDomain.CurrentDomain.GetAssemblies() -> GetTypes() ->
+        /// GetMethods() -> IsDefined(inherit: true). In the Unity 6 Editor AppDomain that
+        /// measured ~3.5s per sweep, and InvokeCallbacks runs two sweeps (global + local),
+        /// so it accounted for ~6.9s of a ~7.4s hot reload — 94% of total latency, recomputing
+        /// a set that only changes when assemblies change.
+        ///
+        /// TypeCache is the index Unity already maintains for exactly this query and rebuilds
+        /// on domain reload, so the sweep cost disappears instead of being cached by hand.
+        /// </summary>
         private static IEnumerable<MethodInfo> FindAttributedMethods(Type attributeType)
         {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            foreach (var method in TypeCache.GetMethodsWithAttribute(attributeType))
             {
-                if (assembly.IsDynamic)
+                yield return method;
+            }
+
+            // TypeCache only indexes assemblies Unity compiled. Types introduced during this
+            // play session live in a hot assembly loaded via Assembly.Load(byte[]) and are
+            // invisible to it, so they are scanned directly. HotTypeRegistry only ever holds
+            // types added by hot reload, so this stays small — it is not the old full sweep.
+            foreach (var hotType in HotTypeRegistry.GetAll())
+            {
+                if (hotType == null)
                 {
                     continue;
                 }
 
-                Type[] types;
-                try
+                foreach (var method in hotType.GetMethods(HotTypeMethodFlags))
                 {
-                    types = assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException ex)
-                {
-                    types = ex.Types.Where(type => type != null).ToArray();
-                }
-                catch
-                {
-                    continue;
-                }
-
-                foreach (var type in types)
-                {
-                    if (type == null)
+                    if (method.IsDefined(attributeType, inherit: true))
                     {
-                        continue;
-                    }
-
-                    var methods = type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
-                    foreach (var method in methods)
-                    {
-                        if (method.IsDefined(attributeType, inherit: true))
-                        {
-                            yield return method;
-                        }
+                        yield return method;
                     }
                 }
             }

@@ -44,6 +44,11 @@ namespace Nimrita.InstaReload.Editor
         public int LastErrorCount { get; internal set; }
         public string LastErrorSummary { get; internal set; }
         public double LastUpdateTime { get; internal set; }
+        internal ReloadTimingSample LastTiming { get; set; }
+        public double TotalAverageMs { get; internal set; }
+        public double TotalBestMs { get; internal set; }
+        public double TotalWorstMs { get; internal set; }
+        public int ReloadCount { get; internal set; }
     }
 
     internal static class InstaReloadSessionMetrics
@@ -71,6 +76,11 @@ namespace Nimrita.InstaReload.Editor
         private static int _lastErrorCount;
         private static string _lastErrorSummary = string.Empty;
         private static double _lastUpdateTime;
+        private static ReloadTimingSample _lastTiming;
+        private static int _reloadCount;
+        private static double _totalMsSum;
+        private static double _totalBestMs;
+        private static double _totalWorstMs;
 
         internal static void Reset()
         {
@@ -97,6 +107,11 @@ namespace Nimrita.InstaReload.Editor
                 _lastSkippedCount = 0;
                 _lastErrorCount = 0;
                 _lastErrorSummary = string.Empty;
+                _lastTiming = null;
+                _reloadCount = 0;
+                _totalMsSum = 0;
+                _totalBestMs = 0;
+                _totalWorstMs = 0;
                 _lastUpdateTime = EditorApplication.timeSinceStartup;
             }
         }
@@ -227,6 +242,38 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
+        /// <summary>
+        /// Records the end-to-end stage breakdown for one completed reload cycle.
+        /// This is the only source of true save -> patch latency; compile timings alone
+        /// cover a single stage of the pipeline.
+        /// </summary>
+        internal static void RecordTimeline(ReloadTimingSample sample)
+        {
+            if (sample == null)
+            {
+                return;
+            }
+
+            lock (Sync)
+            {
+                _lastTiming = sample;
+                _reloadCount++;
+                _totalMsSum += sample.TotalMs;
+
+                if (_reloadCount == 1 || sample.TotalMs < _totalBestMs)
+                {
+                    _totalBestMs = sample.TotalMs;
+                }
+
+                if (sample.TotalMs > _totalWorstMs)
+                {
+                    _totalWorstMs = sample.TotalMs;
+                }
+
+                _lastUpdateTime = EditorApplication.timeSinceStartup;
+            }
+        }
+
         internal static void RecordFailure(string message)
         {
             lock (Sync)
@@ -266,7 +313,12 @@ namespace Nimrita.InstaReload.Editor
                     LastSkippedCount = _lastSkippedCount,
                     LastErrorCount = _lastErrorCount,
                     LastErrorSummary = _lastErrorSummary,
-                    LastUpdateTime = _lastUpdateTime
+                    LastUpdateTime = _lastUpdateTime,
+                    LastTiming = _lastTiming,
+                    TotalAverageMs = _reloadCount > 0 ? _totalMsSum / _reloadCount : 0,
+                    TotalBestMs = _totalBestMs,
+                    TotalWorstMs = _totalWorstMs,
+                    ReloadCount = _reloadCount
                 };
             }
         }

@@ -168,10 +168,17 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             public string CompilationAssemblyName;
             public bool IsFastPath;
             public DateTime SourceWriteTimeUtc;
+            public ReloadTimeline Timeline;
         }
 
         private static FileSystemWatcher _watcher;
         private static readonly HashSet<string> _changedFiles = new HashSet<string>();
+
+        // One timeline per file awaiting processing, opened by the first watcher event of a
+        // burst so end-to-end latency is measured from the user's save, not from the moment
+        // the debounce window happened to close.
+        private static readonly Dictionary<string, ReloadTimeline> _pendingTimelines =
+            new Dictionary<string, ReloadTimeline>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, int> _readRetryCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private static readonly object _lock = new object();
         private static double _lastChangeTime;
@@ -248,16 +255,34 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
         }
 
+        /// <summary>
+        /// Records a pending change and stamps its timeline. Runs on the FileSystemWatcher's
+        /// background thread: the first event for a file opens its timeline (T0), later events
+        /// in the same burst only raise the event count and extend the debounce window.
+        /// </summary>
+        private static void TrackChangedFile(string filePath)
+        {
+            lock (_lock)
+            {
+                _changedFiles.Add(filePath);
+
+                if (!_pendingTimelines.TryGetValue(filePath, out var timeline))
+                {
+                    timeline = new ReloadTimeline(filePath);
+                    _pendingTimelines[filePath] = timeline;
+                }
+
+                timeline.MarkWatcherEvent();
+                _lastChangeTime = EditorApplication.timeSinceStartup;
+            }
+        }
+
         private static void OnFileChanged(object sender, FileSystemEventArgs e)
         {
             if (!ShouldProcessFile(e.FullPath))
                 return;
 
-            lock (_lock)
-            {
-                _changedFiles.Add(e.FullPath);
-                _lastChangeTime = EditorApplication.timeSinceStartup;
-            }
+            TrackChangedFile(e.FullPath);
         }
 
         private static void OnFileCreated(object sender, FileSystemEventArgs e)
@@ -266,11 +291,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return;
 
             InstaReloadLogger.Log($"[FileDetector] New file created: {Path.GetFileName(e.FullPath)}");
-            lock (_lock)
-            {
-                _changedFiles.Add(e.FullPath);
-                _lastChangeTime = EditorApplication.timeSinceStartup;
-            }
+            TrackChangedFile(e.FullPath);
         }
 
         private static void OnFileRenamed(object sender, RenamedEventArgs e)
@@ -281,11 +302,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return;
             }
 
-            lock (_lock)
-            {
-                _changedFiles.Add(e.FullPath);
-                _lastChangeTime = EditorApplication.timeSinceStartup;
-            }
+            TrackChangedFile(e.FullPath);
         }
 
         private static void OnEditorUpdate()
@@ -416,6 +433,9 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 try
                 {
+                    var timeline = TakePendingTimeline(file);
+                    timeline.MarkDebounceEnd();
+
                     var readStatus = TryReadSourceFile(file, out var sourceCode, out var readError);
                     if (readStatus != FileReadStatus.Success)
                     {
@@ -424,6 +444,10 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                             if (ShouldRetryRead(file, readError))
                             {
                                 retryFiles.Add(file);
+
+                                // Keep the timeline alive across the retry so the reported
+                                // total still starts at the user's save.
+                                ReturnPendingTimeline(timeline);
                             }
                         }
                         else if (readStatus == FileReadStatus.NotFound)
@@ -460,6 +484,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     // We still compile (can't avoid Roslyn for IL generation)
                     // BUT we skip expensive structural validation
                     bool isFastPath = analysis.CanUseFastPath;
+                    timeline.MarkAnalyzeEnd(isFastPath);
 
                     if (isFastPath)
                     {
@@ -484,7 +509,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                             AssemblyName = assemblyName,
                             CompilationAssemblyName = Path.GetFileNameWithoutExtension(file),
                             IsFastPath = isFastPath,
-                            SourceWriteTimeUtc = GetSourceWriteTimeUtc(file)
+                            SourceWriteTimeUtc = GetSourceWriteTimeUtc(file),
+                            Timeline = timeline
                         });
                     }
                     else
@@ -550,22 +576,54 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 InstaReloadSessionMetrics.RecordCompileStart(job.FilePath, job.IsFastPath);
-                compileTask = InstaReloadWorkerClient.CompileAsync(
-                    job.SourceCode,
-                    job.CompilationAssemblyName,
-                    job.FileName,
-                    job.IsFastPath);
+                job.Timeline?.MarkCompileStart();
+                compileTask = StampCompileEnd(
+                    InstaReloadWorkerClient.CompileAsync(
+                        job.SourceCode,
+                        job.CompilationAssemblyName,
+                        job.FileName,
+                        job.IsFastPath),
+                    job.Timeline);
                 return true;
             }
 
             InstaReloadSessionMetrics.RecordCompileStart(job.FilePath, job.IsFastPath);
-            compileTask = Task.Run(() => RoslynCompiler.CompileSource(
-                job.SourceCode,
-                job.CompilationAssemblyName,
-                job.FileName,
-                useFastPath: job.IsFastPath,
-                emitLogs: false));
+            job.Timeline?.MarkCompileStart();
+            compileTask = StampCompileEnd(
+                Task.Run(() => RoslynCompiler.CompileSource(
+                    job.SourceCode,
+                    job.CompilationAssemblyName,
+                    job.FileName,
+                    useFastPath: job.IsFastPath,
+                    emitLogs: false)),
+                job.Timeline);
             return true;
+        }
+
+        /// <summary>
+        /// Stamps compile completion from inside a continuation so the mark always
+        /// happens-before the main thread observes the returned task as complete. The gap
+        /// between that stamp and <see cref="ProcessActiveCompileJob"/> picking the result up
+        /// is main-thread starvation, which is otherwise invisible.
+        /// GetAwaiter().GetResult() rethrows the original exception unwrapped, preserving the
+        /// failure behavior the caller already relies on.
+        /// </summary>
+        private static Task<CompilationResult> StampCompileEnd(
+            Task<CompilationResult> compileTask,
+            ReloadTimeline timeline)
+        {
+            if (timeline == null)
+            {
+                return compileTask;
+            }
+
+            return compileTask.ContinueWith(
+                completed =>
+                {
+                    timeline.MarkCompileEnd();
+                    return completed.GetAwaiter().GetResult();
+                },
+                TaskContinuationOptions.ExecuteSynchronously);
         }
 
         private static void ProcessActiveCompileJob(bool allowApply)
@@ -579,6 +637,10 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 return;
             }
+
+            // Stamped the moment the main thread first sees the result, so the wait between
+            // compile finishing and this poll running is attributed to pickup, not to patching.
+            _activeCompileJob?.Timeline?.MarkPickup();
 
             var job = _activeCompileJob;
             var task = _activeCompileTask;
@@ -645,7 +707,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     return;
                 }
 
-                ApplyCompiledAssembly(result.CompiledAssembly, job.AssemblyName, job.FilePath, job.IsFastPath);
+                ApplyCompiledAssembly(result.CompiledAssembly, job.AssemblyName, job.FilePath, job.IsFastPath, job.Timeline);
             }
             else
             {
@@ -704,6 +766,70 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
         }
 
+        /// <summary>
+        /// Removes and returns the timeline opened by this file's watcher burst. Falls back to
+        /// a fresh timeline when no watcher event opened one, so a reload is never unreported.
+        /// </summary>
+        private static ReloadTimeline TakePendingTimeline(string filePath)
+        {
+            lock (_lock)
+            {
+                if (_pendingTimelines.TryGetValue(filePath, out var timeline))
+                {
+                    _pendingTimelines.Remove(filePath);
+                    return timeline;
+                }
+            }
+
+            var fallback = new ReloadTimeline(filePath);
+            fallback.MarkWatcherEvent();
+            return fallback;
+        }
+
+        private static void ReturnPendingTimeline(ReloadTimeline timeline)
+        {
+            if (timeline == null)
+            {
+                return;
+            }
+
+            lock (_lock)
+            {
+                // A newer watcher burst may have opened its own timeline while this file was
+                // locked; that one is the accurate starting point, so don't clobber it.
+                if (!_pendingTimelines.ContainsKey(timeline.FilePath))
+                {
+                    _pendingTimelines[timeline.FilePath] = timeline;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Closes out a reload's timeline: feeds it to the session metrics and prints the
+        /// end-to-end breakdown. This total is what "instant" is measured against — the
+        /// compile number alone covers a single stage of the pipeline.
+        /// </summary>
+        private static void ReportTimeline(ReloadTimeline timeline)
+        {
+            if (timeline == null)
+            {
+                return;
+            }
+
+            timeline.MarkPostPatchEnd();
+
+            var sample = timeline.BuildSample();
+            InstaReloadSessionMetrics.RecordTimeline(sample);
+
+            var pathLabel = sample.IsFastPath ? "fast" : "slow";
+            InstaReloadLogger.Log(
+                InstaReloadLogCategory.FileDetector,
+                $"[Timing] {sample.FileName} — TOTAL {sample.TotalMs:F0}ms ({pathLabel} path)");
+            InstaReloadLogger.Log(
+                InstaReloadLogCategory.FileDetector,
+                $"[Timing]   → {sample.BuildBreakdownLine()}");
+        }
+
         private static void RequeueFile(string filePath)
         {
             if (string.IsNullOrEmpty(filePath))
@@ -730,7 +856,12 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
         }
 
-        private static void ApplyCompiledAssembly(byte[] assemblyBytes, string assemblyName, string sourceFilePath, bool isFastPath = false)
+        private static void ApplyCompiledAssembly(
+            byte[] assemblyBytes,
+            string assemblyName,
+            string sourceFilePath,
+            bool isFastPath = false,
+            ReloadTimeline timeline = null)
         {
             try
             {
@@ -753,6 +884,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 InstaReloadSessionMetrics.RecordPatchStart(assemblyName);
+                timeline?.MarkPatchStart();
                 var stopwatch = Stopwatch.StartNew();
                 var result = patcher.ApplyAssembly(
                     tempPath,
@@ -760,6 +892,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     replayContext: null,
                     preserveExistingHooks: true);
                 stopwatch.Stop();
+                timeline?.MarkPatchEnd();
                 InstaReloadSessionMetrics.RecordPatchResult(result, stopwatch.Elapsed.TotalMilliseconds);
 
                 if (result != null)
@@ -768,6 +901,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     {
                         PatchHistoryStore.RecordPatch(result, sourceFilePath, assemblyBytes);
                     }
+
+                    timeline?.MarkHistoryEnd();
 
                     HotReloadCallbackInvoker.InvokeCallbacks(result);
 
@@ -791,6 +926,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     InstaReloadLogger.LogError($"[FileDetector] Hot reload failed for {Path.GetFileName(sourceFilePath)} ({assemblyName})");
                     InstaReloadStatusOverlay.ShowMessage("Hot reload failed - see Console", false);
                 }
+
+                ReportTimeline(timeline);
 
                 // Clean up temp file
                 try
@@ -833,6 +970,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 _changedFiles.Clear();
                 _readRetryCounts.Clear();
+                _pendingTimelines.Clear();
             }
 
             _pendingCompileJobs.Clear();
@@ -922,6 +1060,10 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
                 InstaReloadLogger.Log($"[FileDetector] Replaying {records.Count} cached patch(es)");
 
+                // Replay runs on the Play-mode-enter path, so its cost is felt as slow entry
+                // rather than slow reload. Timed separately from the save -> patch timeline.
+                var replayStopwatch = Stopwatch.StartNew();
+
                 var stale = new List<PatchRecord>();
                 foreach (var record in records.OrderBy(r => r.timestampUtcTicks))
                 {
@@ -961,6 +1103,11 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 {
                     PatchHistoryStore.RemoveRecords(stale);
                 }
+
+                replayStopwatch.Stop();
+                InstaReloadLogger.Log(
+                    InstaReloadLogCategory.FileDetector,
+                    $"[Timing] Patch replay ({records.Count} record(s)) took {replayStopwatch.Elapsed.TotalMilliseconds:F0}ms — added to Play mode entry");
             }
             catch (Exception ex)
             {
