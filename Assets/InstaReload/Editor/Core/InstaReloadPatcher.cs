@@ -1974,6 +1974,23 @@ namespace Nimrita.InstaReload.Editor
             // Deliberately keyed on IAsyncStateMachine, NOT on the MoveNext name: ITERATOR state
             // machines also have MoveNext and they clone correctly (coroutines, including
             // already-running ones, are verified working). Only the async ones are broken.
+            // The OUTER async method must be refused too, not just the state machine's own methods.
+            // Evidence (2026-08-06): our slow path uses Release emit, which emits an async state
+            // machine as a STRUCT, while Unity's runtime build has it as a CLASS - logged as
+            // "<RunAsync>d__31: base class changed (System.Object -> System.ValueType)" plus a
+            // phantom "removed" .ctor. Patching the outer method leaves it manipulating a type
+            // that structurally disagrees with the runtime one, which ends in a
+            // StackOverflowException that kills the Editor. Refusing the whole async method is the
+            // safe superset; 0e910e9 refused only the state machine and that was not enough.
+            if (HasAsyncStateMachineAttribute(method))
+            {
+                reason =
+                    $"async method ({method.DeclaringType.Name}.{method.Name}) cannot be patched yet - " +
+                    "its state machine is emitted differently by our compile than by Unity's, so it " +
+                    "keeps its previous body until you exit Play Mode";
+                return false;
+            }
+
             if (IsAsyncStateMachine(method.DeclaringType))
             {
                 reason =
@@ -2005,6 +2022,32 @@ namespace Nimrita.InstaReload.Editor
         /// async/await). Iterator state machines implement IEnumerator instead and are NOT matched,
         /// because those clone correctly.
         /// </summary>
+        /// <summary>
+        /// True for a method the compiler rewrote into an async state machine - i.e. one written
+        /// with async/await. Detected via AsyncStateMachineAttribute, which the compiler applies to
+        /// the OUTER method (the state machine type itself is matched by IsAsyncStateMachine).
+        /// </summary>
+        private static bool HasAsyncStateMachineAttribute(MethodDefinition method)
+        {
+            if (method == null || !method.HasCustomAttributes)
+            {
+                return false;
+            }
+
+            foreach (var attribute in method.CustomAttributes)
+            {
+                if (string.Equals(
+                        attribute.AttributeType.FullName,
+                        "System.Runtime.CompilerServices.AsyncStateMachineAttribute",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static bool IsAsyncStateMachine(TypeDefinition type)
         {
             if (type == null || !type.HasInterfaces)
