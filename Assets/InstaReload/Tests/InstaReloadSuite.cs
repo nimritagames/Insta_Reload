@@ -74,10 +74,18 @@ namespace Nimrita.InstaReload.Tests
     /// expectation, and if it needs a value-type generic instantiation add a call site in CallSites
     /// so the harvester can see it.
     ///
-    /// BRANCH DIFFERENCE: on dev, generics are REFUSED, so every generic case is declared Stale
-    /// here. On feature/generic-methods they are declared Patched. If you merge that branch, flip
-    /// those expectations - a FAIL is then telling you the merge changed behaviour, which is the
-    /// point.
+    /// GENERICS: supported since feature/generic-methods merged (2026-08-06). Generic methods,
+    /// generic classes, multiple type parameters, `where T : struct` and nested generic arguments
+    /// all patch, and are declared Patched here. The ONE exception is a generic METHOD on a generic
+    /// TYPE (Boxed&lt;T&gt;.BothAxes&lt;U&gt;): the patcher refuses it loudly - "NO instantiation
+    /// patched" - so it stays Stale.
+    ///
+    /// EXPECTED LEAK, one line, until the token fall-through is fixed: "generic method on generic
+    /// type" prints a LEAK because the patcher refuses BothAxes while the DIRECT call site in
+    /// patched Evaluate still binds to the hot assembly's copy - so the call site reports M1 while
+    /// the runtime method correctly reports the old marker. The graded value is the runtime one, so
+    /// the case still passes. That LEAK line disappears when CloneInstruction stops falling through
+    /// to the hot assembly on a lookup miss. A leak on ANY OTHER case is new and worth chasing.
     ///
     /// ONE-CYCLE SETTLE, not a bug: "coroutine ongoing" can report the PREVIOUS marker on the first
     /// grade after a patch. OngoingCoroutine resumes every 0.25s, so if the first Evaluate after a
@@ -126,6 +134,17 @@ namespace Nimrita.InstaReload.Tests
         private bool _ongoingExited;
 
         /// <summary>
+        /// Targets for the generic-class cases, constructed in Awake ON PURPOSE.
+        /// Constructing them inside Evaluate produced HOT-ASSEMBLY instances - the newobj token for
+        /// a generic type is not remapped to the runtime type, so the suite was grading the hot
+        /// copy and could not see the runtime type at all. Awake runs once, before any patch
+        /// exists, so these are unambiguously runtime-assembly objects.
+        /// </summary>
+        private Boxed<int> _boxedInt;
+        private Boxed<string> _boxedString;
+        private Combos _combos;
+
+        /// <summary>
         /// The marker as compiled into THIS assembly, captured before any hot patch. Awake does not
         /// re-run on a hot reload, so this stays at the pre-edit value while patched methods start
         /// reporting the new one - which is what makes "expected to stay stale" gradable.
@@ -168,6 +187,9 @@ namespace Nimrita.InstaReload.Tests
             _list = new List<int> { 1, 2, 3 };
             _map = new Dictionary<string, int> { { "a", 1 }, { "b", 2 } };
             _lambda = () => Marker;
+            _boxedInt = new Boxed<int>();
+            _boxedString = new Boxed<string>();
+            _combos = new Combos();
             StartCoroutine(OngoingCoroutine());
         }
 
@@ -306,7 +328,7 @@ namespace Nimrita.InstaReload.Tests
         /// Failures come back as sentinel strings so one broken case cannot suppress the rest.
         /// </summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static string Reflected(object target, string methodName, Type[] typeArgs, object[] args)
+        private string Reflected(object target, string methodName, Type[] typeArgs, object[] args)
         {
             try
             {
@@ -315,7 +337,22 @@ namespace Nimrita.InstaReload.Tests
                     return "TARGET-NULL";
                 }
 
-                var method = target.GetType().GetMethod(methodName, CaseBinding);
+                // ORIGIN CHECK. Reflection proves WHICH METHOD ran; it says nothing about which
+                // OBJECT it ran on. A case whose target is constructed inside patched Evaluate can
+                // get a hot-assembly instance if that newobj token was not remapped - and then both
+                // the direct call and the reflected call interrogate the SAME wrong object, agree
+                // with each other, and report a method as patched that the patcher openly refused.
+                // Caught exactly that way: the patcher logged "Boxed`1::BothAxes`1: NO instantiation
+                // patched" while this suite scored it a pass.
+                // `this` was created by Unity from the assembly Unity compiled, so its assembly is
+                // authoritative even when read from inside a patched body.
+                var targetType = target.GetType();
+                if (targetType.Assembly != GetType().Assembly)
+                {
+                    return "HOT-OBJECT:" + targetType.Assembly.GetName().Name;
+                }
+
+                var method = targetType.GetMethod(methodName, CaseBinding);
                 if (method == null)
                 {
                     return "NO-METHOD";
@@ -365,9 +402,9 @@ namespace Nimrita.InstaReload.Tests
         private void Evaluate()
         {
             var t = new Tally();
-            var boxedInt = new Boxed<int>();
-            var boxedString = new Boxed<string>();
-            var combos = new Combos();
+            var boxedInt = _boxedInt;
+            var boxedString = _boxedString;
+            var combos = _combos;
 
             // ---- proven working today ----
             Check(t, "plain body",
@@ -406,35 +443,35 @@ namespace Nimrita.InstaReload.Tests
 
             Check(t, "generic method <string>",
                 GenericMethod("x"),
-                Reflected(this, "GenericMethod", new[] { typeof(string) }, new object[] { "x" }), Expect.Stale);
+                Reflected(this, "GenericMethod", new[] { typeof(string) }, new object[] { "x" }), Expect.Patched);
 
             Check(t, "generic method <int>",
                 GenericMethod(1),
-                Reflected(this, "GenericMethod", new[] { typeof(int) }, new object[] { 1 }), Expect.Stale);
+                Reflected(this, "GenericMethod", new[] { typeof(int) }, new object[] { 1 }), Expect.Patched);
 
             Check(t, "generic class <string>",
                 boxedString.Read(),
-                Reflected(boxedString, "Read", null, null), Expect.Stale);
+                Reflected(boxedString, "Read", null, null), Expect.Patched);
 
             Check(t, "generic class <int>",
                 boxedInt.Read(),
-                Reflected(boxedInt, "Read", null, null), Expect.Stale);
+                Reflected(boxedInt, "Read", null, null), Expect.Patched);
 
             Check(t, "generic class new List<T>",
                 boxedInt.WithOpenList(),
-                Reflected(boxedInt, "WithOpenList", null, null), Expect.Stale);
+                Reflected(boxedInt, "WithOpenList", null, null), Expect.Patched);
 
             Check(t, "combo two type params",
                 combos.TwoParams(1, "x"),
-                Reflected(combos, "TwoParams", new[] { typeof(int), typeof(string) }, new object[] { 1, "x" }), Expect.Stale);
+                Reflected(combos, "TwoParams", new[] { typeof(int), typeof(string) }, new object[] { 1, "x" }), Expect.Patched);
 
             Check(t, "combo where T : struct",
                 combos.StructOnly(7),
-                Reflected(combos, "StructOnly", new[] { typeof(int) }, new object[] { 7 }), Expect.Stale);
+                Reflected(combos, "StructOnly", new[] { typeof(int) }, new object[] { 7 }), Expect.Patched);
 
             Check(t, "combo nested generic arg",
                 combos.Nested(new List<int>()),
-                Reflected(combos, "Nested", new[] { typeof(List<int>) }, new object[] { new List<int>() }), Expect.Stale);
+                Reflected(combos, "Nested", new[] { typeof(List<int>) }, new object[] { new List<int>() }), Expect.Patched);
 
             Check(t, "constructs own generic type",
                 combos.ConstructsOwnGeneric(),
@@ -445,9 +482,9 @@ namespace Nimrita.InstaReload.Tests
             // Unity's build makes it a class (796b63e). A PASS here means the refusal still holds.
             Check(t, "async (refused)", _asyncSeen, _asyncSeen, Expect.Stale);
 
-            Check(t, "generic method <double> no call site",
+            Check(t, "generic method <double>",
                 GenericMethod(1.0d),
-                Reflected(this, "GenericMethod", new[] { typeof(double) }, new object[] { 1.0d }), Expect.Stale);
+                Reflected(this, "GenericMethod", new[] { typeof(double) }, new object[] { 1.0d }), Expect.Patched);
 
             Check(t, "generic method on generic type",
                 boxedInt.BothAxes(1),
