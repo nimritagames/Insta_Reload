@@ -165,3 +165,31 @@ Format: date / issue / cause / fix
     experiment was so revealing; (b) the one-generation lag on the second reload of a session.
     Both are call-site problems tangled up with Mono generic sharing. The suite's LEAK lines are now
     the standing detector for both.
+
+- Date: 2026-08-06 (both call-site bugs FIXED)
+  Issue: (a) a call to a generic method from a patched body ran the HOT assembly's copy instead of
+    the patched runtime method - invisible while both carry the same value; (b) on a session's
+    SECOND reload, call sites ran the PREVIOUS generation's copy, leaving them exactly one
+    generation stale while the runtime method was current.
+  Cause: ONE cause, the same fall-through as the newobj bug. A generic method reference kept
+    pointing at the assembly we just compiled instead of being rebuilt against the runtime type.
+  Fix: NeedsRuntimeRetarget now covers BOTH shapes - a generic instantiation of one of our types
+    (Boxed<int>::Read) and a generic METHOD on one of our types (GenericMethod<string>) - for every
+    opcode, not just newobj. External generics stay excluded: List`1<int> binds to 'netstandard'
+    where only one copy exists.
+  MEASURED, identical protocol, marker flips inside one Play session:
+      no retarget             gen1 22/22 + 1 LEAK    gen2 22/22 + 10 LEAKs
+      newobj only             gen1 22/22 + 1 LEAK    gen2 22/22 + 10 LEAKs
+      newobj + generic calls  gen1 22/22 + 0 LEAK    gen2 22/22 + 0 LEAK   <- shipped
+    Also gen3 clean, and the newobj check (targets constructed inside patched Evaluate, the shape
+    that used to give four HOT-OBJECT failures) is 22/22 with none. The BothAxes LEAK that stood all
+    night is gone too: the call now reaches the runtime method, which is correctly unpatched.
+  A WRONG TURN WORTH KEEPING: retargeting by declaring type alone, all opcodes, but NOT generic
+    methods, produced six NEW leaks where call sites fell back to the ORIGINAL body - strictly worse
+    than the hot copy they had before. The two shapes must move together.
+  A HYPOTHESIS THAT WAS WRONG: that the shared <object> hook fails to cover reference-type
+    instantiations reached from a direct call site, so reference instantiations would need hooking
+    individually. Tried it, and everything went green - but an A/B with that half reverted was ALSO
+    green, so it was not load-bearing and was dropped. The comment at BuildGenericHookTargets
+    claiming one hook covers every reference instantiation still stands, now re-verified with an
+    honest harness rather than the old one.

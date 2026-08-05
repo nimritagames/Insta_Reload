@@ -3242,12 +3242,12 @@ namespace Nimrita.InstaReload.Editor
                     return Instruction.Create(source.OpCode, module.ImportReference(runtimeMethod));
                 }
 
-                // A generic instantiation of one of OUR types must be rebuilt against the runtime
-                // type even when there is no generic parameter to substitute - see
-                // DeclaringTypeHasRuntimeCounterpart. NEWOBJ ONLY, deliberately: see that method.
+                // A reference into one of OUR generic types, or to a generic method of ours, must be
+                // rebuilt against the runtime type even when there is no generic parameter to
+                // substitute - otherwise it stays bound to the assembly we just compiled. See
+                // NeedsRuntimeRetarget for the two bugs this fixes and the measurements.
                 if (!NeedsGenericSubstitution(context, methodReference) &&
-                    !(source.OpCode == CecilOpCodes.Newobj &&
-                      DeclaringTypeHasRuntimeCounterpart(context, methodReference)))
+                    !NeedsRuntimeRetarget(context, methodReference))
                 {
                     return Instruction.Create(source.OpCode, module.ImportReference(methodReference));
                 }
@@ -3578,46 +3578,51 @@ namespace Nimrita.InstaReload.Editor
         /// takes the original import path, which was correct all along.
         /// </summary>
         /// <summary>
-        /// True when a method's declaring type is a generic instantiation of a type that ALSO exists
-        /// in the runtime assembly - Boxed&lt;int&gt; where Boxed`1 is one of ours.
+        /// True when a method reference must be REBUILT against the runtime type instead of imported
+        /// as-is. Two shapes qualify, and both are ours:
+        ///   * a generic instantiation of one of our types - Boxed&lt;int&gt;::Read
+        ///   * a generic METHOD on one of our types    - InstaReloadSuite::GenericMethod&lt;string&gt;
         ///
-        /// Such a reference has to be REBUILT against the runtime type. Left alone,
-        /// ImportReference keeps it pointing at the assembly we just compiled, so
-        /// <c>new Boxed&lt;int&gt;()</c> inside a patched body constructs the HOT type - a different
-        /// Type object from the runtime one. It survives while it stays in a local, which is why
-        /// nothing crashed, but is/as/casts against the runtime type fail and assigning it to a
-        /// runtime-typed field does not behave. The same fall-through also let a REFUSED method stay
-        /// callable through its hot copy.
+        /// Left alone, ImportReference keeps such a reference pointing at the assembly we just
+        /// compiled. Two distinct bugs came out of that, both measured:
+        ///   1. NEWOBJ minted the wrong object. `new Boxed&lt;int&gt;()` in a patched body produced a
+        ///      HOT-assembly instance - a different Type from the runtime one, so is/as/casts and
+        ///      assignment to a runtime-typed field misbehave. It survives in a local, which is why
+        ///      nothing crashed. Proved with a temporary log:
+        ///        newobj Boxed`1&lt;System.Int32&gt;::.ctor() -> binds to scope 'InstaReloadSuite.dll'
+        ///   2. CALL/CALLVIRT reached the wrong body. A call to a generic method ran the HOT copy
+        ///      rather than the patched runtime method - invisible while both carry the same value -
+        ///      and on a session's SECOND reload it ran the PREVIOUS generation's copy, leaving call
+        ///      sites exactly one generation stale while the runtime method was current.
         ///
-        /// Measured 2026-08-06 before the fix:
-        ///   FALLTHROUGH newobj ... Boxed`1&lt;System.Int32&gt;::.ctor() -> binds to scope 'InstaReloadSuite.dll'
-        ///
-        /// EXTERNAL generics are deliberately excluded. The same run showed
+        /// EXTERNAL generics are excluded deliberately. The same diagnostic showed
         /// List`1&lt;System.Int32&gt;::.ctor() binding to 'netstandard', where only one copy of the
-        /// type exists, so the plain import is already correct and rebuilding it would be churn.
-        /// The rule is: retarget only types that can have a second, hot copy.
+        /// type exists, so importing it as-is is already correct. The rule is: retarget only what
+        /// can have a second, hot copy.
         ///
-        /// APPLIED TO NEWOBJ ONLY, and that boundary is measured, not cautious by taste. Applying it
-        /// to call/callvirt as well regressed six generic-method call sites: they stopped reaching
-        /// the patched body and started reaching the ORIGINAL one, which is strictly worse than the
-        /// hot copy they reached before. A/B on 2026-08-06, identical protocol both runs:
-        ///   without  22/22, 1 LEAK (BothAxes, pre-existing)
-        ///   with, all opcodes  22/22, 6 NEW LEAKs "call site saw M0 but runtime returned M1"
-        ///   with, newobj only  22/22, 1 LEAK (BothAxes) - baseline restored, newobj fixed
-        /// newobj is also where the damage actually is: it MINTS an object of the wrong Type that
-        /// then escapes into the program. A call returning a stale value is a different problem,
-        /// tangled up with Mono's generic sharing, and does not belong in this fix.
+        /// MEASURED, identical protocol each run, marker flips within one Play session:
+        ///   no retarget            gen1 22/22 + 1 LEAK   gen2 22/22 + 10 LEAKs
+        ///   newobj only            gen1 22/22 + 1 LEAK   gen2 22/22 + 10 LEAKs
+        ///   newobj + generic calls gen1 22/22 + 0 LEAK   gen2 22/22 + 0 LEAK
+        /// A wrong middle attempt is worth recording too: retargeting by declaring type alone, for
+        /// every opcode, but NOT generic methods, produced six NEW leaks where call sites fell back
+        /// to the ORIGINAL body - strictly worse than the hot copy. The two shapes have to move
+        /// together.
         /// </summary>
-        private static bool DeclaringTypeHasRuntimeCounterpart(
-            MethodRewriteContext context,
-            MethodReference method)
+        private static bool NeedsRuntimeRetarget(MethodRewriteContext context, MethodReference method)
         {
-            if (!(method.DeclaringType is GenericInstanceType instance))
+            if (method.DeclaringType is GenericInstanceType instance)
             {
-                return false;
+                return IsRuntimeAssemblyType(context, instance.ElementType);
             }
 
-            var resolved = ResolveRuntimeType(instance.ElementType, context.RuntimeAssembly);
+            // A generic method on a NON-generic declaring type - GenericMethod<string> on the suite.
+            return method is GenericInstanceMethod && IsRuntimeAssemblyType(context, method.DeclaringType);
+        }
+
+        private static bool IsRuntimeAssemblyType(MethodRewriteContext context, TypeReference type)
+        {
+            var resolved = ResolveRuntimeType(type, context.RuntimeAssembly);
             return resolved != null && resolved.Assembly == context.RuntimeAssembly;
         }
 
