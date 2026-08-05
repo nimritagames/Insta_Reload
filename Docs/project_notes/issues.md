@@ -144,6 +144,18 @@ Format: date / task / status
     session and was off by exactly one generation. See decisions.md - undiagnosed, now visible.
   Files: Assets/InstaReload/Tests/InstaReloadSuite.cs
 
+- Date: 2026-08-06
+  Task: Merge feature/generic-methods into dev
+  Status: Done - merged as 1fafefa, verified in Play Mode (baseline 22/22, after flip 22/22)
+  Notes: The branch tip's "generics regressed" verdict was a harness artefact, not a product bug -
+    the old suite's one-line cases were inlined, so it read unpatched bodies and reported failure.
+    Generic methods, generic classes, multiple type params, where T : struct and nested generic
+    args all patch. Generic METHOD on a generic TYPE is still refused (loudly). Nine suite
+    expectations flipped Stale -> Patched. Two further harness holes closed: object-origin checking
+    (HOT-OBJECT) and Awake-constructed generic targets.
+  Files: Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs,
+    Assets/InstaReload/Tests/InstaReloadSuite.cs
+
 ## Improvement Backlog
 
 - LATENCY WORK IS DONE (2026-08-05). 7365ms -> ~59ms, 125x. Noise floor reached: identical work

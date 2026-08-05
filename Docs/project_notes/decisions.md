@@ -497,3 +497,37 @@ Format: date / decision / context / outcome
     report the previous marker on the FIRST grade after a patch, because the already-running
     iterator resumes every 0.25s and may not have re-entered its body yet. Observed once, passed on
     the next line. The observation is correct; only the timing is imprecise.
+
+- Date: 2026-08-06
+  Decision: MERGED feature/generic-methods into dev (1fafefa). Generic hot reload ships.
+  THE REGRESSION AT THE BRANCH TIP WAS NOT REAL. 1911d3a recorded "the 9 generic cases stopped
+    patching" and 88e647e stopped at "Not fixed", having ruled out the parameter offset and
+    nominated the trampolines 2 -> 0 drop as the next thread. Re-measured on the merged tree with
+    the reflection-based suite: generics patch correctly. Nothing had regressed. The verdict came
+    from the OLD harness - one-line `return Marker;` cases with no NoInlining, which Mono inlined
+    into the caller, so the suite read the unpatched body's marker and called it a failure.
+    44eaad2 named inlining correctly but predicted the wrong DIRECTION: it faked a FAIL, not a PASS,
+    and the victim was the whole generic branch rather than the trivial dev cases.
+    Four commits were spent chasing a bug that was never in the product. This is the single
+    strongest argument for the "fix the harness first" instinct - the harness was costing days.
+  ALSO KILLED: the trampolines 2 -> 0 lead. dev carries the same parameter-offset fix, also reports
+    TrampolineCount 0 (FileChangeDetector only prints it when > 0), and passes every entry-point,
+    coroutine and event case. Trampolines were not the thread.
+  MEASURED, and the suite now agrees line for line with the patcher's own reporting:
+    GenericMethod`1 patched 4 instantiation(s) Int32|Single|Double · Boxed`1::Read`0 2 ·
+    Boxed`1::WithOpenList 2 · Combos::TwoParams`2 2 · Combos::StructOnly`1 1 (+Int32) ·
+    Combos::Nested`1 1 · Boxed`1::BothAxes`1 NO instantiation patched (refused, keeps old body).
+    Baseline 22/22, after the flip 22/22, zero errors, Editor stable. Nine expectations flipped
+    Stale -> Patched; BothAxes stays Stale, exactly as 7f31f1d documented.
+  TWO MORE HARNESS HOLES, found and closed during the merge:
+    1. ORIGIN. Reflection proves which METHOD ran, never which OBJECT it ran on. Targets built
+       inside patched Evaluate came back as HOT-ASSEMBLY instances, so BOTH channels interrogated
+       the same wrong object, agreed, and scored BothAxes a pass while the patcher logged it
+       refused. Reflected() now compares the target's assembly to `this` and reports HOT-OBJECT.
+       GENERAL RULE: agreement between two observations is not evidence when both can share the
+       same wrong input.
+    2. Generic-class targets are constructed in Awake now, before any patch exists, so they are
+       unambiguously runtime-assembly objects.
+  STILL OPEN, and now the top lead: the generic-newobj token fall-through (see bugs.md). It is the
+    same silent CloneInstruction miss behind the standing LEAK line, and a miss should warn rather
+    than quietly bind to the hot assembly.

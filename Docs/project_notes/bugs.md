@@ -116,3 +116,23 @@ Format: date / issue / cause / fix
     cracked this. Console output and process state could only ever say THAT it froze. Reach for the
     log first on any hang/crash. Note Unity overwrites Editor.log on start - the crashed session
     lives in Editor-prev.log.
+
+- Date: 2026-08-06
+  Issue: After a hot reload, `new SomeGeneric<T>()` inside a PATCHED method constructs an instance
+    of the HOT assembly's type, not the runtime type. Non-generic `new Combos()` remaps correctly.
+  Cause: InstaReloadPatcher.CloneInstruction looks the member reference up in the runtime method map
+    and, ON A MISS, falls through to `module.ImportReference(methodReference)` - which keeps the
+    reference pointing at the freshly compiled hot assembly. A generic type's .ctor is spelled by
+    Cecil with a GenericInstanceType declaring type while reflection reports the open definition, so
+    the key never matches and every generic newobj takes the fall-through.
+  Measured: the suite's origin check reported HOT-OBJECT:InstaReloadSuite for all four Boxed<T>
+    cases while `new Combos()` was fine. Same fall-through also leaves a REFUSED method callable
+    through its hot copy - that is the standing LEAK line on "generic method on generic type",
+    where the call site reports the new marker while the runtime method correctly reports the old.
+  Impact: the hot instance is a DIFFERENT Type from the runtime one. It works while it stays in a
+    local inside the patched body, which is why nothing crashed. Assigning it to a runtime-typed
+    field, or any is/as/cast against the runtime type, would not behave.
+  Fix: NOT DONE. Collapse the declaring type to its ElementType when building the key for member
+    references, the same way GetDeclaringTypeKeyName already does on the generic path, and apply it
+    to the newobj/ctor lookup too. A miss should arguably also WARN instead of silently falling
+    through to the hot assembly - the silence is what let this live undetected.
