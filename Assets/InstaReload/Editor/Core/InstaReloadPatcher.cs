@@ -2685,7 +2685,14 @@ namespace Nimrita.InstaReload.Editor
                 methodIds,
                 dispatchKeys,
                 dispatcherInvokeMethod,
-                targetIncludesThis: false);
+                // DERIVED, not assumed. MonoMod sometimes hands back a STATIC clone with `this` as
+                // an explicit first parameter and sometimes an instance one, so a hardcoded value is
+                // wrong half the time. It was hardcoded false, which shifted EVERY parameter
+                // reference by one in the static case: a method reading its 4th argument actually
+                // read its 3rd. Silent - no crash, no warning, just wrong values. Methods that
+                // merely null-checked a parameter looked fine, which is why it survived all day.
+                // Comparing counts self-corrects for both shapes.
+                targetIncludesThis: context.Method.Parameters.Count > updatedMethod.Parameters.Count);
 
             rewriteContext.TargetMethod = context.Method;
             rewriteContext.GenericArguments = genericArguments;
