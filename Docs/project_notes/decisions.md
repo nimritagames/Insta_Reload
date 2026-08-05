@@ -531,3 +531,34 @@ Format: date / decision / context / outcome
   STILL OPEN, and now the top lead: the generic-newobj token fall-through (see bugs.md). It is the
     same silent CloneInstruction miss behind the standing LEAK line, and a miss should warn rather
     than quietly bind to the hot assembly.
+
+- Date: 2026-08-06
+  Decision: GENERIC METHOD ON A GENERIC TYPE now hot reloads. The last refused generic shape is
+    done, so generics are feature-complete for everything the suite can reach.
+  Two separate defects, and the second only became visible once the first was fixed:
+  1. THE METHOD STAYED OPEN. ApplyGenericTypeMethodHooks constructed the declaring TYPE and stopped
+     there, so GetMethodFromHandle returned Boxed<int>.BothAxes<U> with U still unbound and ILHook
+     rejected it outright - "Specified method is not supported", the exact error 7f31f1d recorded.
+     Fixed by closing the method too via MakeGenericMethod, and by hooking the full cross product of
+     (type args x method args), each pair under its own key. Both substitution channels
+     (GenericArguments + DeclaringTypeArguments) are now passed together, which had never happened
+     before - they existed but had only ever been exercised separately.
+  2. NO VALUE-TYPE METHOD ARG WAS EVER FOUND. With (1) fixed the hooks installed but the suite still
+     read stale, and the report said "patched 2" with no method type args covered - only the shared
+     object body. The call-site harvest key did not match. Proved with a temporary log rather than
+     guessed:
+       want ...Boxed`1::BothAxes`1(U)=>System.String
+       have ...Boxed`1::BothAxes`1(!!0)=>System.String
+     Cecil leaves a generic parameter UNNAMED when the reference was constructed rather than
+     resolved, and GenericParameter.Name then falls back to its position. So the same parameter is
+     "U" in the definition and "!!0" at a call site reached through a generic INSTANCE declaring
+     type. Methods on NON-generic types matched by name, which is why this stayed hidden.
+     Fixed with GetInstantiationKey, which spells generic parameters POSITIONALLY on both sides.
+     FOURTH instance of the Cecil-vs-reflection key mismatch in this project, after generic field
+     types (b47b42e), generic declaring types (d6ee90b) and the collapsed method key. The pattern
+     holds: any key built from both Cecil and reflection is suspect. Names are the recurring
+     culprit - positions and element types are stable, spellings are not.
+  MEASURED: BothAxes reports "patched 4 instantiation(s) - value types covered: System.Int32,
+    method type args covered: System.Int32" - the full 2x2 cross product. Suite baseline 22/22,
+    gen1 22/22, gen2 22/22, zero LEAK lines, no errors. Its expectation is flipped Stale -> Patched,
+    so async is now the ONLY Stale case left in the suite.

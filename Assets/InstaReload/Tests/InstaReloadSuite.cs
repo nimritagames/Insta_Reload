@@ -74,11 +74,10 @@ namespace Nimrita.InstaReload.Tests
     /// expectation, and if it needs a value-type generic instantiation add a call site in CallSites
     /// so the harvester can see it.
     ///
-    /// GENERICS: supported since feature/generic-methods merged (2026-08-06). Generic methods,
-    /// generic classes, multiple type parameters, `where T : struct` and nested generic arguments
-    /// all patch, and are declared Patched here. The ONE exception is a generic METHOD on a generic
-    /// TYPE (Boxed&lt;T&gt;.BothAxes&lt;U&gt;): the patcher refuses it loudly - "NO instantiation
-    /// patched" - so it stays Stale.
+    /// GENERICS: fully supported as of 2026-08-06. Generic methods, generic classes, multiple type
+    /// parameters, `where T : struct`, nested generic arguments, AND a generic method on a generic
+    /// type (Boxed&lt;T&gt;.BothAxes&lt;U&gt;, both axes at once) all patch. Every generic case here
+    /// is declared Patched. `async` is the only remaining Stale case in the suite.
     ///
     /// NO LEAK LINE SHOULD EVER PRINT NOW. The token fall-through behind them was fixed on
     /// 2026-08-06 (NeedsRuntimeRetarget): generic newobj and generic call sites are rebuilt against
@@ -488,7 +487,7 @@ namespace Nimrita.InstaReload.Tests
 
             Check(t, "generic method on generic type",
                 boxedInt.BothAxes(1),
-                Reflected(boxedInt, "BothAxes", new[] { typeof(int) }, new object[] { 1 }), Expect.Stale);
+                Reflected(boxedInt, "BothAxes", new[] { typeof(int) }, new object[] { 1 }), Expect.Patched);
 
             var guard = _ongoingExited ? " GUARD-TRIPPED(iterator corrupted)" : string.Empty;
             var verdict = t.Passed == t.Total ? "PASS" : "FAIL";

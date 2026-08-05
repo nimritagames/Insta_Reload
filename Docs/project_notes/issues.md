@@ -168,6 +168,20 @@ Format: date / task / status
     and per-reference-type instantiation hooking (green, but A/B showed it was not load-bearing).
   Files: Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs
 
+- Date: 2026-08-06
+  Task: Generic method on a generic type (Boxed<T>.BothAxes<U>) - the last refused generic shape
+  Status: Done - verified in Play Mode, baseline + two generations 22/22, zero LEAK lines
+  Notes: Two defects stacked. The declaring type was constructed but the METHOD stayed open, so
+    ILHook refused it; fixed by closing the method too and hooking the (type args x method args)
+    cross product with both substitution channels passed together for the first time. That exposed
+    the second: the call-site harvest key spelled the parameter "!!0" where the definition said "U",
+    because Cecil leaves a constructed reference's generic parameter unnamed and Name falls back to
+    position. GetInstantiationKey now keys positionally. Fourth Cecil-vs-reflection key mismatch.
+    BothAxes reports 4 instantiations; its expectation flipped Stale -> Patched. async is the only
+    Stale case left.
+  Files: Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs,
+    Assets/InstaReload/Tests/InstaReloadSuite.cs
+
 ## Improvement Backlog
 
 - LATENCY WORK IS DONE (2026-08-05). 7365ms -> ~59ms, 125x. Noise floor reached: identical work
