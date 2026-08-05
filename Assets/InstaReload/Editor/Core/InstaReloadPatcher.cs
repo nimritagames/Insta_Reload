@@ -3176,8 +3176,21 @@ namespace Nimrita.InstaReload.Editor
             var module = context.TargetModule;
             if (operand is MethodReference methodReference)
             {
+                // The runtime-method map is keyed on the OPEN declaring type, because that is what
+                // reflection reports and what makes lookups inside a generic type work. That means
+                // a call to a CLOSED instantiation - newobj Repo<int>::.ctor() - also matches the
+                // entry for the open Repo<T>::.ctor(). Emitting that resolved open method produced
+                // Mono's "Method with open type while not compiling gshared" and made any method
+                // constructing one of our own generic types unpatchable.
+                //
+                // So the map shortcut is only valid when the declaring type is not a generic
+                // instantiation. Otherwise build a substituted reference, which keeps the
+                // instantiation closed.
+                var declaringIsGenericInstance = methodReference.DeclaringType is GenericInstanceType;
+
                 var methodKey = GetMethodKey(methodReference);
-                if (context.RuntimeMethods.TryGetValue(methodKey, out var runtimeMethod))
+                if (!declaringIsGenericInstance &&
+                    context.RuntimeMethods.TryGetValue(methodKey, out var runtimeMethod))
                 {
                     return Instruction.Create(source.OpCode, module.ImportReference(runtimeMethod));
                 }

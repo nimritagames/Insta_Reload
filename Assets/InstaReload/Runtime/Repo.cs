@@ -23,32 +23,54 @@ namespace Nimrita.InstaReload
         public string Plain()
         {
             _counter++;
-            return "OWNER-GUARD:plain:" + _counter;
+            return "GSHARED-FIXED:plain:" + _counter;
         }
 
         public string WithOpenList()
         {
             var list = new List<T>();
             list.Add(default(T));
-            return "OWNER-GUARD:openlist:" + list.Count + ":" + typeof(T).Name;
+            return "GSHARED-FIXED:openlist:" + list.Count + ":" + typeof(T).Name;
         }
 
         public string WithClosedList()
         {
             var list = new List<int> { 1, 2 };
-            return "OWNER-GUARD:closedlist:" + list.Count;
+            return "GSHARED-FIXED:closedlist:" + list.Count;
         }
 
         public string WithDictionary()
         {
             var map = new Dictionary<string, T>();
             map["k"] = default(T);
-            return "OWNER-GUARD:dict:" + map.Count;
+            return "GSHARED-FIXED:dict:" + map.Count;
         }
     }
 
     public static class RepoCallSites
     {
+        // BISECT for the Mono "open type while not compiling gshared" failure. Clue:
+        // Repo.WithClosedList constructs new List<int>() and patches FINE, so constructing a
+        // generic instance is not itself the problem. These three separate the suspicions.
+        public static string OnlyMscorlib()
+        {
+            var list = new List<int>();
+            list.Add(1);
+            return "GSHARED-FIXED:mscorlib:" + list.Count;
+        }
+
+        public static string OwnNoCall()
+        {
+            var repo = new Repo<int>();
+            return "GSHARED-FIXED:ownnocall:" + (repo != null);
+        }
+
+        public static string OwnWithCall()
+        {
+            var repo = new Repo<int>();
+            return "GSHARED-FIXED:owncall:" + repo.Plain();
+        }
+
         public static string Exercise()
         {
             return new Repo<string>().WithOpenList()
