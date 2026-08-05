@@ -254,6 +254,12 @@ namespace Nimrita.InstaReload.Editor
 
                 _isLocked = false;
 
+                // A clean Play Mode exit proves every patch applied during this session was
+                // survivable, so they become eligible for replay. Anything that crashed the session
+                // never reaches here and stays unverified - which is what stops a crashing patch
+                // from being replayed on every subsequent Play Mode entry.
+                PatchHistoryStore.MarkAllVerified();
+
                 InstaReloadLogger.LogVerbose("[Suppressor] ✓ Unity compilation RESTORED");
                 InstaReloadLogger.LogVerbose("[Suppressor]   → Processing pending changes...");
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Play Mode ended");

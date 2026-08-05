@@ -18,6 +18,14 @@ namespace Nimrita.InstaReload.Editor
         public string runtimeModuleMvid;
         public PatchTokenPairRecord[] tokenPairs;
         public long timestampUtcTicks;
+
+        /// <summary>
+        /// False until the Editor has survived a clean Play Mode exit with this patch applied.
+        /// Unverified records are NOT replayed: a patch that crashed the session it was created in
+        /// would otherwise be replayed on every Play Mode entry, crashing the Editor each time and
+        /// losing unsaved work until Library/InstaReload was deleted by hand.
+        /// </summary>
+        public bool verified;
     }
 
     [Serializable]
@@ -106,6 +114,119 @@ namespace Nimrita.InstaReload.Editor
             catch (Exception ex)
             {
                 InstaReloadLogger.LogWarning($"[PatchHistory] Failed to record patch: {ex.Message}");
+            }
+        }
+
+        /// <summary>Sentinel proving a replay attempt finished. Left behind if replay killed the
+        /// Editor, which is how a crash-loop is detected on the next attempt.</summary>
+        private static string ReplaySentinelPath =>
+            Path.Combine(CacheFolderName, CacheRootName, "replay-in-progress");
+
+        /// <summary>True when the previous replay attempt never completed - i.e. it took the Editor
+        /// down with it. The caller should quarantine rather than replay again.</summary>
+        internal static bool WasPreviousReplayIncomplete()
+        {
+            try
+            {
+                return File.Exists(ReplaySentinelPath);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static void BeginReplayAttempt()
+        {
+            try
+            {
+                var directory = Path.GetDirectoryName(ReplaySentinelPath);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                File.WriteAllText(ReplaySentinelPath, DateTime.UtcNow.ToString("o"));
+            }
+            catch
+            {
+                // A missing sentinel only costs crash-loop detection; never block replay over it.
+            }
+        }
+
+        internal static void EndReplayAttempt()
+        {
+            try
+            {
+                if (File.Exists(ReplaySentinelPath))
+                {
+                    File.Delete(ReplaySentinelPath);
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+        }
+
+        /// <summary>
+        /// Called on a clean Play Mode exit, which proves every applied patch was survivable.
+        /// Only verified records are eligible for replay.
+        /// </summary>
+        internal static void MarkAllVerified()
+        {
+            lock (Sync)
+            {
+                var records = LoadRecordsInternal();
+                if (records.Count == 0)
+                {
+                    return;
+                }
+
+                var changed = false;
+                foreach (var record in records)
+                {
+                    if (!record.verified)
+                    {
+                        record.verified = true;
+                        changed = true;
+                    }
+                }
+
+                if (changed)
+                {
+                    SaveRecordsInternal(records);
+                }
+            }
+        }
+
+        /// <summary>Drops every record and its cached assembly. Used to break a replay crash-loop.</summary>
+        internal static void QuarantineAll(string reason)
+        {
+            lock (Sync)
+            {
+                var records = LoadRecordsInternal();
+                foreach (var record in records)
+                {
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(record.patchAssemblyPath) && File.Exists(record.patchAssemblyPath))
+                        {
+                            File.Delete(record.patchAssemblyPath);
+                        }
+                    }
+                    catch
+                    {
+                        // ignored
+                    }
+                }
+
+                SaveRecordsInternal(new List<PatchRecord>());
+                EndReplayAttempt();
+
+                InstaReloadLogger.LogWarning(
+                    $"[PatchHistory] Quarantined {records.Count} cached patch(es): {reason}. " +
+                    "Play Mode will start from the compiled assembly; re-save your file to patch again.");
             }
         }
 

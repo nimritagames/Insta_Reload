@@ -3195,6 +3195,11 @@ namespace Nimrita.InstaReload.Editor
                     return Instruction.Create(source.OpCode, module.ImportReference(runtimeMethod));
                 }
 
+                if (!NeedsGenericSubstitution(context, methodReference))
+                {
+                    return Instruction.Create(source.OpCode, module.ImportReference(methodReference));
+                }
+
                 return Instruction.Create(
                     source.OpCode,
                     ImportMethodReferenceSubstituted(context, methodReference));
@@ -3209,6 +3214,12 @@ namespace Nimrita.InstaReload.Editor
                     {
                         return Instruction.Create(source.OpCode, module.ImportReference(runtimeField));
                     }
+                }
+
+                if (!NeedsGenericSubstitution(context, fieldReference.DeclaringType) &&
+                    !NeedsGenericSubstitution(context, fieldReference.FieldType))
+                {
+                    return Instruction.Create(source.OpCode, module.ImportReference(fieldReference));
                 }
 
                 return Instruction.Create(
@@ -3502,6 +3513,97 @@ namespace Nimrita.InstaReload.Editor
             }
 
             return context.TargetModule.ImportReference(type);
+        }
+
+        /// <summary>
+        /// True when a type mentions a generic parameter WE are responsible for substituting.
+        ///
+        /// Used to leave references alone unless they genuinely need rewriting. Rebuilding every
+        /// method reference - even ones with no parameter of ours - reintroduced the async
+        /// StackOverflow crash: the outer async method calls
+        /// AsyncTaskMethodBuilder.Start&lt;TStateMachine&gt;(ref TStateMachine), and reconstructing that
+        /// reference produced IL the runtime could not use. Anything not needing substitution now
+        /// takes the original import path, which was correct all along.
+        /// </summary>
+        private static bool NeedsGenericSubstitution(MethodRewriteContext context, TypeReference type)
+        {
+            if (type == null)
+            {
+                return false;
+            }
+
+            if (type is GenericParameter parameter)
+            {
+                return OwnsGenericParameter(context, parameter);
+            }
+
+            if (type is GenericInstanceType instance)
+            {
+                if (NeedsGenericSubstitution(context, instance.ElementType))
+                {
+                    return true;
+                }
+
+                foreach (var argument in instance.GenericArguments)
+                {
+                    if (NeedsGenericSubstitution(context, argument))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (type is ArrayType array)
+            {
+                return NeedsGenericSubstitution(context, array.ElementType);
+            }
+
+            if (type is ByReferenceType byRef)
+            {
+                return NeedsGenericSubstitution(context, byRef.ElementType);
+            }
+
+            if (type is PointerType pointer)
+            {
+                return NeedsGenericSubstitution(context, pointer.ElementType);
+            }
+
+            return false;
+        }
+
+        /// <summary>True when any part of a method reference's signature needs substituting.</summary>
+        private static bool NeedsGenericSubstitution(MethodRewriteContext context, MethodReference method)
+        {
+            if (method is GenericInstanceMethod instance)
+            {
+                foreach (var argument in instance.GenericArguments)
+                {
+                    if (NeedsGenericSubstitution(context, argument))
+                    {
+                        return true;
+                    }
+                }
+
+                return NeedsGenericSubstitution(context, instance.ElementMethod);
+            }
+
+            if (NeedsGenericSubstitution(context, method.DeclaringType) ||
+                NeedsGenericSubstitution(context, method.ReturnType))
+            {
+                return true;
+            }
+
+            foreach (var parameter in method.Parameters)
+            {
+                if (NeedsGenericSubstitution(context, parameter.ParameterType))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /// <summary>

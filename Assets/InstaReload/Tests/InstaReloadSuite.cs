@@ -59,6 +59,14 @@ namespace Nimrita.InstaReload.Tests
         private string _freshSeen = "(pending)";
         private bool _ongoingExited;
 
+        /// <summary>
+        /// The marker as compiled into THIS assembly, captured before any hot patch. Awake does not
+        /// re-run on a hot reload, so this stays at the pre-edit value while patched methods start
+        /// reporting the new one - which is what makes "expected to stay stale" gradable.
+        /// Without it, every Stale case failed at baseline simply because nothing had been patched.
+        /// </summary>
+        private string _baselineMarker = "(unset)";
+
         private enum Expect
         {
             /// <summary>Must pick up the edit.</summary>
@@ -87,6 +95,7 @@ namespace Nimrita.InstaReload.Tests
         private void Awake()
         {
             _iterations = 0;
+            _baselineMarker = Marker;
             _plainInt = 4242;
             _list = new List<int> { 1, 2, 3 };
             _map = new Dictionary<string, int> { { "a", 1 }, { "b", 2 } };
@@ -251,8 +260,12 @@ namespace Nimrita.InstaReload.Tests
         {
             total++;
 
-            var isCurrent = observed == Marker;
-            var ok = expect == Expect.Patched ? isCurrent : !isCurrent;
+            // Patched: must report the CURRENT marker.
+            // Stale:   must still report the marker compiled in before the edit. Equal at baseline,
+            //          so a clean run reports all-pass before anything is patched.
+            var ok = expect == Expect.Patched
+                ? observed == Marker
+                : observed == _baselineMarker;
 
             if (ok)
             {
@@ -262,8 +275,8 @@ namespace Nimrita.InstaReload.Tests
 
             failures.AppendLine(
                 expect == Expect.Patched
-                    ? $"   FAIL {name}: expected patched, saw \"{observed}\""
-                    : $"   FAIL {name}: expected STALE (documented limitation), but it updated");
+                    ? $"   FAIL {name}: expected patched to \"{Marker}\", saw \"{observed}\""
+                    : $"   FAIL {name}: expected STALE at \"{_baselineMarker}\" (documented limitation), saw \"{observed}\"");
         }
     }
 
