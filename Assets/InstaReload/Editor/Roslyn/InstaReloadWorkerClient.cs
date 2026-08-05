@@ -26,9 +26,24 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
     internal static class InstaReloadWorkerClient
     {
-        private const int ProtocolVersion = 1;
+        private const int ProtocolVersion = 2;
         private const int ConnectTimeoutMs = 5000;
+
+        /// <summary>Probing for an already-running worker. A dead loopback port refuses
+        /// immediately, so this ceiling is effectively never reached.</summary>
+        private const int AdoptTimeoutMs = 1000;
+
+        /// <summary>Port range the per-project offset is spread across, so two projects open
+        /// at once never adopt each other's worker.</summary>
+        private const int PortSpan = 64;
+
         private const int MaxMessageSize = 64 * 1024 * 1024;
+
+        /// <summary>Throwaway compile issued right after connect. A freshly spawned worker has
+        /// never run Roslyn's binder or emitter, and that first run costs ~850ms; paying it
+        /// here keeps it off the first real save.</summary>
+        private const string WarmupSource =
+            "internal static class InstaReloadWarmup { internal static int Ping() { return 0; } }";
 
         private static readonly object Sync = new object();
         private static readonly SemaphoreSlim RequestLock = new SemaphoreSlim(1, 1);
@@ -82,6 +97,9 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
             if (needsRestart)
             {
+                // References or defines changed (package added, define symbol edited). The
+                // worker's cached MetadataReferences are stale, so it has to be rebuilt.
+                LogLifecycle("Compilation context changed — restarting worker");
                 Shutdown();
             }
 
@@ -248,24 +266,34 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         {
             try
             {
-                SetState(InstaReloadWorkerState.Starting, string.Empty);
-                if (!EnsureWorkerProcess(settings, context, out var workerError))
-                {
-                    SetState(InstaReloadWorkerState.Failed, workerError);
-                    return;
-                }
-
+                // Adopt before spawning. The worker outlives play mode exits and domain
+                // reloads now, so an already-running one is the WARM one — spawning a fresh
+                // process instead is exactly the cold start this change exists to remove.
                 SetState(InstaReloadWorkerState.Connecting, string.Empty);
-                var client = new TcpClient();
-                var connectTask = client.ConnectAsync("127.0.0.1", settings.WorkerPort);
-                var timeoutTask = Task.Delay(ConnectTimeoutMs);
-                var completed = await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
-                if (completed != connectTask)
+                var client = await TryConnectAsync(context.Port, AdoptTimeoutMs).ConfigureAwait(false);
+                var adopted = client != null;
+
+                if (!adopted)
                 {
-                    throw new TimeoutException("Worker connection timed out");
+                    SetState(InstaReloadWorkerState.Starting, string.Empty);
+                    if (!EnsureWorkerProcess(settings, context, out var workerError))
+                    {
+                        SetState(InstaReloadWorkerState.Failed, workerError);
+                        LogLifecycleWarning($"Start failed on port {context.Port}: {workerError}");
+                        return;
+                    }
+
+                    SetState(InstaReloadWorkerState.Connecting, string.Empty);
+                    client = await TryConnectAsync(context.Port, ConnectTimeoutMs).ConfigureAwait(false);
+                    if (client == null)
+                    {
+                        SetState(InstaReloadWorkerState.Failed, "Worker connection timed out");
+                        LogLifecycleWarning(
+                            $"Spawned worker on port {context.Port} but it never accepted a connection " +
+                            $"within {ConnectTimeoutMs}ms — compiles will stall until this resolves");
+                        return;
+                    }
                 }
-                await connectTask.ConfigureAwait(false);
-                client.NoDelay = true;
 
                 var stream = client.GetStream();
                 var initRequest = new InitRequest
@@ -273,7 +301,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     type = "init",
                     protocolVersion = ProtocolVersion,
                     references = context.References,
-                    defines = context.Defines
+                    defines = context.Defines,
+                    projectPath = context.ProjectPath
                 };
 
                 await WriteMessageAsync(stream, initRequest).ConfigureAwait(false);
@@ -281,13 +310,18 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 if (string.IsNullOrEmpty(initJson))
                 {
                     SetState(InstaReloadWorkerState.Failed, "Worker init failed");
+                    LogLifecycleWarning($"No init response from worker on port {context.Port}");
+                    client.Close();
                     return;
                 }
 
                 var initResponse = JsonUtility.FromJson<InitResponse>(initJson);
                 if (initResponse == null || !initResponse.success)
                 {
-                    SetState(InstaReloadWorkerState.Failed, initResponse?.error ?? "Worker init failed");
+                    var initError = initResponse?.error ?? "Worker init failed";
+                    SetState(InstaReloadWorkerState.Failed, initError);
+                    LogLifecycleWarning($"Init rejected on port {context.Port}: {initError}");
+                    client.Close();
                     return;
                 }
 
@@ -305,10 +339,86 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 SetState(InstaReloadWorkerState.Connected, string.Empty);
+                LogLifecycle(
+                    $"{(adopted ? "Adopted running" : "Spawned new")} worker on port {context.Port} " +
+                    $"({initResponse.referenceCount} refs, context {(initResponse.contextReused ? "reused warm" : "rebuilt")})");
+
+                await WarmupAsync(adopted && initResponse.contextReused).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 SetState(InstaReloadWorkerState.Failed, ex.Message);
+                LogLifecycleWarning($"Connect failed on port {context.Port}: {ex.Message}");
+            }
+        }
+
+        private static async Task<TcpClient> TryConnectAsync(int port, int timeoutMs)
+        {
+            var client = new TcpClient();
+            try
+            {
+                var connectTask = client.ConnectAsync("127.0.0.1", port);
+                var completed = await Task.WhenAny(connectTask, Task.Delay(timeoutMs)).ConfigureAwait(false);
+                if (completed != connectTask)
+                {
+                    client.Close();
+                    return null;
+                }
+
+                await connectTask.ConfigureAwait(false);
+                client.NoDelay = true;
+                return client;
+            }
+            catch
+            {
+                try
+                {
+                    client.Close();
+                }
+                catch
+                {
+                    // Nothing to recover — caller treats null as "no worker there".
+                }
+
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Issues a throwaway compile so Roslyn's binder and emitter are JIT'd and reference
+        /// metadata is materialised before the user's first real save. On a freshly spawned
+        /// worker this is the ~850ms that used to land on that first save; on an adopted warm
+        /// worker it costs a few ms and simply confirms the connection works.
+        /// </summary>
+        private static async Task WarmupAsync(bool alreadyWarm)
+        {
+            var stopwatch = Stopwatch.StartNew();
+            try
+            {
+                var result = await CompileAsync(
+                    WarmupSource,
+                    "InstaReloadWarmup",
+                    "InstaReloadWarmup.cs",
+                    isFastPath: true).ConfigureAwait(false);
+
+                stopwatch.Stop();
+
+                if (result == null || !result.Success)
+                {
+                    LogLifecycleWarning(
+                        $"Warmup compile failed after {stopwatch.Elapsed.TotalMilliseconds:F0}ms: " +
+                        $"{result?.ErrorMessage ?? "no result"} — the first real save will pay the cold cost");
+                    return;
+                }
+
+                LogLifecycle(
+                    $"Warmup compile {stopwatch.Elapsed.TotalMilliseconds:F0}ms " +
+                    $"({(alreadyWarm ? "worker was already warm" : "cold start absorbed here")})");
+            }
+            catch (Exception ex)
+            {
+                stopwatch.Stop();
+                LogLifecycleWarning($"Warmup compile threw after {stopwatch.Elapsed.TotalMilliseconds:F0}ms: {ex.Message}");
             }
         }
 
@@ -343,7 +453,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = "dotnet",
-                    Arguments = $"\"{workerDllPath}\" --port {settings.WorkerPort} --parentPid {Process.GetCurrentProcess().Id}",
+                    Arguments = $"\"{workerDllPath}\" --port {context.Port} --parentPid {Process.GetCurrentProcess().Id}",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = settings.VerboseLogging,
@@ -454,7 +564,56 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             var defines = GetDefineSymbols(settings);
             var workerProjectPath = GetWorkerProjectPath();
             var workerDllPath = GetWorkerDllPath();
-            return new CompileContext(references, defines, workerProjectPath, workerDllPath);
+            var projectPath = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            return new CompileContext(
+                references,
+                defines,
+                workerProjectPath,
+                workerDllPath,
+                projectPath,
+                ResolveWorkerPort(settings, projectPath));
+        }
+
+        /// <summary>
+        /// Offsets the configured base port by a stable hash of the project path.
+        ///
+        /// The worker used to be killed on every play mode exit, so a shared fixed port was
+        /// only briefly contended. Now that workers persist and are adopted on reconnect, two
+        /// projects sharing a port would mean project B adopting project A's worker and
+        /// re-initialising it with B's references — silently compiling A against the wrong set.
+        /// A per-project port removes that class of bug; the worker's ProjectPath check is the
+        /// backstop if two projects still collide inside the span.
+        /// </summary>
+        private static int ResolveWorkerPort(InstaReloadSettings settings, string projectPath)
+        {
+            using (var sha = SHA256.Create())
+            {
+                var hash = sha.ComputeHash(Encoding.UTF8.GetBytes(projectPath.ToLowerInvariant()));
+                var offset = ((hash[0] << 8) | hash[1]) % PortSpan;
+                return settings.WorkerPort + offset;
+            }
+        }
+
+        private static void LogLifecycle(string message)
+        {
+            if (IsMainThread())
+            {
+                InstaReloadLogger.Log(InstaReloadLogCategory.General, $"[Worker] {message}");
+                return;
+            }
+
+            EnqueueMainThread(() => InstaReloadLogger.Log(InstaReloadLogCategory.General, $"[Worker] {message}"));
+        }
+
+        private static void LogLifecycleWarning(string message)
+        {
+            if (IsMainThread())
+            {
+                InstaReloadLogger.LogWarning(InstaReloadLogCategory.General, $"[Worker] {message}");
+                return;
+            }
+
+            EnqueueMainThread(() => InstaReloadLogger.LogWarning(InstaReloadLogCategory.General, $"[Worker] {message}"));
         }
 
         private static List<string> GetDefineSymbols(InstaReloadSettings settings)
@@ -740,18 +899,32 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
         private sealed class CompileContext
         {
-            public CompileContext(List<string> references, List<string> defines, string workerProjectPath, string workerDllPath)
+            public CompileContext(
+                List<string> references,
+                List<string> defines,
+                string workerProjectPath,
+                string workerDllPath,
+                string projectPath,
+                int port)
             {
                 References = references ?? new List<string>();
                 Defines = defines ?? new List<string>();
                 WorkerProjectPath = workerProjectPath ?? string.Empty;
                 WorkerDllPath = workerDllPath ?? string.Empty;
+                ProjectPath = projectPath ?? string.Empty;
+                Port = port;
             }
 
             public List<string> References { get; }
             public List<string> Defines { get; }
             public string WorkerProjectPath { get; }
             public string WorkerDllPath { get; }
+
+            /// <summary>Resolved on the main thread in BuildContext — Application.dataPath is
+            /// not valid from the connect task's background thread.</summary>
+            public string ProjectPath { get; }
+
+            public int Port { get; }
         }
 
         [Serializable]
@@ -767,6 +940,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             public int protocolVersion;
             public List<string> references = new List<string>();
             public List<string> defines = new List<string>();
+            public string projectPath;
         }
 
         [Serializable]
@@ -775,6 +949,9 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             public string type;
             public bool success;
             public string error;
+            public bool contextReused;
+            public int referenceCount;
+            public string projectPath;
         }
 
         [Serializable]

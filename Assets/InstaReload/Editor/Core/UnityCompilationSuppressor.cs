@@ -249,7 +249,13 @@ namespace Nimrita.InstaReload.Editor
                 InstaReloadLogger.Log("[Suppressor] ✓ Unity compilation RESTORED");
                 InstaReloadLogger.Log("[Suppressor]   → Processing pending changes...");
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Play Mode ended");
-                Roslyn.InstaReloadWorkerClient.Shutdown();
+
+                // The worker is deliberately NOT shut down here. It is a separate process that
+                // a domain reload cannot touch, and killing it threw away warm Roslyn state —
+                // costing ~850ms on the first save of every play session. It self-terminates
+                // when Unity exits (spawned with --parentPid), and the next play session adopts
+                // it over the loopback port instead of spawning a cold one.
+                InstaReloadLogger.Log("[Suppressor]   → Worker left running to stay warm");
             }
             catch (System.Exception ex)
             {

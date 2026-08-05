@@ -175,7 +175,9 @@ namespace Nimrita.InstaReload.Editor.UI
                 new GUIContent("Auto-start worker", "Build and start the worker when Play Mode begins"),
                 settings.AutoStartWorker);
             settings.WorkerPort = EditorGUILayout.IntField(
-                new GUIContent("Worker port", "Loopback port used for the worker connection"),
+                new GUIContent(
+                    "Worker base port",
+                    "Base loopback port. The actual port is this plus a per-project offset, so two projects open at once get separate workers."),
                 settings.WorkerPort);
             if (EditorGUI.EndChangeCheck())
             {

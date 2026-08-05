@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -16,7 +17,7 @@ namespace InstaReloadWorker
     internal static class Program
     {
         private const int DefaultPort = 53530;
-        private const int ProtocolVersion = 1;
+        private const int ProtocolVersion = 2;
         private const int MaxMessageSize = 64 * 1024 * 1024;
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
@@ -26,6 +27,12 @@ namespace InstaReloadWorker
         };
 
         private static CompilationContext _context = new CompilationContext();
+
+        /// <summary>Clients are now handled concurrently so a half-open connection cannot block
+        /// the accept loop. _context is shared, so init and compile stay serialized behind this.</summary>
+        private static readonly object ContextLock = new object();
+
+        private static int _clientCounter;
         private static int _parentPid = -1;
 
         public static async Task<int> Main(string[] args)
@@ -59,21 +66,50 @@ namespace InstaReloadWorker
 
             while (true)
             {
-                TcpClient? client = null;
+                TcpClient client;
                 try
                 {
                     client = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
                     client.NoDelay = true;
-                    await HandleClientAsync(client).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Worker error: {ex.Message}");
+                    Console.WriteLine($"Worker accept error: {ex.Message}");
+                    continue;
                 }
-                finally
+
+                // Each client gets its own handler rather than being awaited inline. The worker
+                // now outlives play mode, so a connection abandoned by a domain reload can sit
+                // half-open indefinitely; awaiting it here would block the accept loop and
+                // starve the live editor, hanging every compile with no error surfaced.
+                _ = HandleClientLifetimeAsync(client);
+            }
+        }
+
+        private static async Task HandleClientLifetimeAsync(TcpClient client)
+        {
+            var clientId = Interlocked.Increment(ref _clientCounter);
+            Console.WriteLine($"Client {clientId} connected");
+            try
+            {
+                await HandleClientAsync(client).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Client {clientId} error: {ex.Message}");
+            }
+            finally
+            {
+                try
                 {
-                    client?.Close();
+                    client.Close();
                 }
+                catch
+                {
+                    // Already torn down by the peer.
+                }
+
+                Console.WriteLine($"Client {clientId} disconnected");
             }
         }
 
@@ -103,13 +139,21 @@ namespace InstaReloadWorker
                 if (string.Equals(messageType, "init", StringComparison.OrdinalIgnoreCase))
                 {
                     var request = JsonSerializer.Deserialize<InitRequest>(json, JsonOptions);
-                    var response = HandleInit(request);
+                    InitResponse response;
+                    lock (ContextLock)
+                    {
+                        response = HandleInit(request);
+                    }
                     await WriteMessageAsync(stream, response).ConfigureAwait(false);
                 }
                 else if (string.Equals(messageType, "compile", StringComparison.OrdinalIgnoreCase))
                 {
                     var request = JsonSerializer.Deserialize<CompileRequest>(json, JsonOptions);
-                    var response = HandleCompile(request);
+                    CompileResponse response;
+                    lock (ContextLock)
+                    {
+                        response = HandleCompile(request);
+                    }
                     await WriteMessageAsync(stream, response).ConfigureAwait(false);
                 }
                 else if (string.Equals(messageType, "shutdown", StringComparison.OrdinalIgnoreCase))
@@ -151,12 +195,52 @@ namespace InstaReloadWorker
 
             try
             {
-                _context = CompilationContext.Create(request.References, request.Defines);
+                var projectPath = request.ProjectPath ?? string.Empty;
+
+                // The worker now outlives play mode, so it can be adopted by a reconnecting
+                // editor. It must never be re-pointed at a DIFFERENT project: that would
+                // silently compile one project's edits against another's references.
+                if (_context != null && _context.IsReady &&
+                    !string.IsNullOrEmpty(_context.ProjectPath) &&
+                    !string.Equals(_context.ProjectPath, projectPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"Init rejected: worker is bound to {_context.ProjectPath}, caller is {projectPath}");
+                    return new InitResponse
+                    {
+                        Type = "init_ack",
+                        Success = false,
+                        Error = $"Worker is bound to a different project: {_context.ProjectPath}"
+                    };
+                }
+
+                // Rebuilding MetadataReferences re-reads every assembly and throws away the
+                // warm state that persisting the process exists to preserve. Skip it when the
+                // reconnecting editor sends the identical reference/define set.
+                var contextKey = CompilationContext.BuildKey(request.References, request.Defines, projectPath);
+                if (_context != null && _context.IsReady && _context.ContextKey == contextKey)
+                {
+                    Console.WriteLine($"Init: reusing warm context ({_context.References.Count} references)");
+                    return new InitResponse
+                    {
+                        Type = "init_ack",
+                        Success = true,
+                        Error = string.Empty,
+                        ContextReused = true,
+                        ReferenceCount = _context.References.Count,
+                        ProjectPath = projectPath
+                    };
+                }
+
+                _context = CompilationContext.Create(request.References, request.Defines, projectPath);
+                Console.WriteLine($"Init: built context ({_context.References.Count} references)");
                 return new InitResponse
                 {
                     Type = "init_ack",
                     Success = true,
-                    Error = string.Empty
+                    Error = string.Empty,
+                    ContextReused = false,
+                    ReferenceCount = _context.References.Count,
+                    ProjectPath = projectPath
                 };
             }
             catch (Exception ex)
@@ -379,11 +463,32 @@ namespace InstaReloadWorker
             public string[] Defines { get; private set; } = Array.Empty<string>();
             public bool IsReady { get; private set; }
 
-            public static CompilationContext Create(IEnumerable<string> references, IEnumerable<string> defines)
+            /// <summary>Identity of the inputs this context was built from, so a reconnecting
+            /// editor sending the same set can reuse it instead of forcing a rebuild.</summary>
+            public string ContextKey { get; private set; } = string.Empty;
+
+            /// <summary>Project this worker is bound to. Guards against a second project
+            /// adopting this worker and re-pointing it at different references.</summary>
+            public string ProjectPath { get; private set; } = string.Empty;
+
+            public static string BuildKey(IEnumerable<string>? references, IEnumerable<string>? defines, string projectPath)
+            {
+                var refs = references == null ? Array.Empty<string>() : new List<string>(references).ToArray();
+                var defs = defines == null ? Array.Empty<string>() : new List<string>(defines).ToArray();
+                Array.Sort(refs, StringComparer.Ordinal);
+                Array.Sort(defs, StringComparer.Ordinal);
+                return (projectPath ?? string.Empty) + "::" +
+                       string.Join("|", refs) + "::" +
+                       string.Join(";", defs);
+            }
+
+            public static CompilationContext Create(IEnumerable<string> references, IEnumerable<string> defines, string projectPath)
             {
                 var context = new CompilationContext
                 {
-                    Defines = defines == null ? Array.Empty<string>() : new List<string>(defines).ToArray()
+                    Defines = defines == null ? Array.Empty<string>() : new List<string>(defines).ToArray(),
+                    ContextKey = BuildKey(references, defines, projectPath),
+                    ProjectPath = projectPath ?? string.Empty
                 };
 
                 if (references != null)
@@ -415,6 +520,7 @@ namespace InstaReloadWorker
             public int ProtocolVersion { get; set; }
             public List<string> References { get; set; } = new List<string>();
             public List<string> Defines { get; set; } = new List<string>();
+            public string ProjectPath { get; set; } = string.Empty;
         }
 
         private sealed class InitResponse
@@ -422,6 +528,9 @@ namespace InstaReloadWorker
             public string Type { get; set; } = string.Empty;
             public bool Success { get; set; }
             public string Error { get; set; } = string.Empty;
+            public bool ContextReused { get; set; }
+            public int ReferenceCount { get; set; }
+            public string ProjectPath { get; set; } = string.Empty;
         }
 
         private sealed class CompileRequest

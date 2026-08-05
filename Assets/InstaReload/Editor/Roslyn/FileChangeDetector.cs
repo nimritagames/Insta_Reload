@@ -209,6 +209,16 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 return;
             }
 
+            // Unity runs [InitializeOnLoad] inside AssetImportWorker processes too. Hot reload
+            // is meaningless there — they never enter play mode — and letting them run means
+            // every import worker opens its own connection to the compile worker, which the
+            // worker's accept loop then has to queue behind the real editor.
+            if (AssetDatabase.IsAssetImportWorkerProcess())
+            {
+                _initialized = true;
+                return;
+            }
+
             var settings = InstaReloadSettings.GetOrCreateSettings();
             if (settings == null)
                 return;
@@ -242,6 +252,14 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 {
                     InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Waiting for changes");
                     InstaReloadLogger.Log("[FileDetector] Real-time file monitoring active");
+
+                    // Pre-heat: connect (or adopt) and run a warmup compile now, at editor load,
+                    // rather than letting the first save pay for a cold Roslyn. EnsureReady only
+                    // kicks off the background connect task — it never blocks here.
+                    if (settings.UseExternalWorker)
+                    {
+                        InstaReloadWorkerClient.EnsureReady();
+                    }
                 }
                 else
                 {
