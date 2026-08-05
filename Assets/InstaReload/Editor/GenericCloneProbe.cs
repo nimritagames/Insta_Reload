@@ -181,6 +181,34 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
+        [MenuItem("Tools/InstaReload Clone Probe/6 - Report gshared risk (Repo)")]
+        public static void ReportRepo()
+        {
+            foreach (var argument in new[] { typeof(string), typeof(GameObject), typeof(int) })
+            {
+                Debug.Log(
+                    $"[CProbe] Repo<{argument.Name}>\n" +
+                    $"   Plain          (control)      = {InvokeRepo(argument, "Plain")}\n" +
+                    $"   WithOpenList   (new List<T>)  = {InvokeRepo(argument, "WithOpenList")}\n" +
+                    $"   WithClosedList (new List<int>)= {InvokeRepo(argument, "WithClosedList")}\n" +
+                    $"   WithDictionary (Dict<str,T>)  = {InvokeRepo(argument, "WithDictionary")}");
+            }
+        }
+
+        private static string InvokeRepo(Type argument, string methodName)
+        {
+            try
+            {
+                var constructed = typeof(Repo<>).MakeGenericType(argument);
+                var instance = Activator.CreateInstance(constructed);
+                return (string)constructed.GetMethod(methodName).Invoke(instance, null);
+            }
+            catch (Exception ex)
+            {
+                return $"THREW {ex.GetType().Name}: {ex.InnerException?.GetType().Name ?? ""}";
+            }
+        }
+
         [MenuItem("Tools/InstaReload Clone Probe/3 - Dispose")]
         public static void Dispose()
         {
