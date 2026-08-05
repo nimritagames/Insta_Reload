@@ -594,6 +594,11 @@ namespace Nimrita.InstaReload.Editor
                         int dispatched = 0;
                         int trampolines = 0;
                         var errors = new List<string>();
+
+                        // Constructs we deliberately refuse to patch (async state machines today).
+                        // Kept separate from `errors` so a known limitation is not reported as a
+                        // failure — see the note at the IsMethodBodySupported call site.
+                        var unsupportedNotes = new List<string>();
                         var newMethodNames = new List<string>();
                         var missingEntryPoints = new List<string>();
                         var tokenPairs = new Dictionary<int, MethodTokenPair>();
@@ -632,9 +637,12 @@ namespace Nimrita.InstaReload.Editor
                             if (!IsMethodBodySupported(method, runtimeFields, out var unsupportedReason))
                             {
                                 skipped++;
+                                // A deliberate refusal is not a failure. Routing these through
+                                // `errors` printed "Failed to patch N method(s)" in red, which
+                                // reads as breakage when it is a known, documented limitation.
                                 if (!string.IsNullOrEmpty(unsupportedReason))
                                 {
-                                    errors.Add($"{methodName}: {unsupportedReason}");
+                                    unsupportedNotes.Add($"{methodName}: {unsupportedReason}");
                                 }
                                 continue;
                             }
@@ -851,6 +859,20 @@ namespace Nimrita.InstaReload.Editor
                             if (skippedGenerics.Count > 3)
                             {
                                 InstaReloadLogger.LogWarning($"  ... and {skippedGenerics.Count - 3} more");
+                            }
+                        }
+
+                        if (unsupportedNotes.Count > 0)
+                        {
+                            InstaReloadLogger.LogWarning(
+                                $"[Patcher] {unsupportedNotes.Count} method(s) NOT patched (unsupported construct):");
+                            foreach (var note in unsupportedNotes.Take(3))
+                            {
+                                InstaReloadLogger.LogWarning($"  -> {note}");
+                            }
+                            if (unsupportedNotes.Count > 3)
+                            {
+                                InstaReloadLogger.LogWarning($"  ... and {unsupportedNotes.Count - 3} more");
                             }
                         }
 
@@ -1460,6 +1482,26 @@ namespace Nimrita.InstaReload.Editor
             IReadOnlyDictionary<string, FieldInfo> runtimeFields,
             out string reason)
         {
+            // Async state machines clone to INVALID IL and crash the Editor. Observed 2026-08-05:
+            //   <RunAsync>d__18::MoveNext: Invalid IL code ... IL_0047: call 0x00000011
+            // a raw, unremapped metadata token. The patch still reported success, installed the
+            // broken method, and the next dispatch through Update recursed until
+            // StackOverflowException killed the Mono runtime — force-quit, unsaved work lost.
+            //
+            // Refuse instead. The async method keeps its previous body, exactly like an
+            // already-running coroutine does, which is a limitation rather than a crash.
+            //
+            // Deliberately keyed on IAsyncStateMachine, NOT on the MoveNext name: ITERATOR state
+            // machines also have MoveNext and they clone correctly (coroutines, including
+            // already-running ones, are verified working). Only the async ones are broken.
+            if (IsAsyncStateMachine(method.DeclaringType))
+            {
+                reason =
+                    $"async state machine ({method.DeclaringType.Name}.{method.Name}) cannot be patched yet - " +
+                    "the async method keeps its previous body until you exit Play Mode";
+                return false;
+            }
+
             foreach (var instruction in method.Body.Instructions)
             {
                 if (!IsOperandSupported(instruction.Operand))
@@ -1476,6 +1518,32 @@ namespace Nimrita.InstaReload.Editor
 
             reason = string.Empty;
             return true;
+        }
+
+        /// <summary>
+        /// True for a compiler-generated async state machine (the &lt;Method&gt;d__N type behind
+        /// async/await). Iterator state machines implement IEnumerator instead and are NOT matched,
+        /// because those clone correctly.
+        /// </summary>
+        private static bool IsAsyncStateMachine(TypeDefinition type)
+        {
+            if (type == null || !type.HasInterfaces)
+            {
+                return false;
+            }
+
+            foreach (var implementation in type.Interfaces)
+            {
+                if (string.Equals(
+                        implementation.InterfaceType.FullName,
+                        "System.Runtime.CompilerServices.IAsyncStateMachine",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private static bool IsFieldRewriteSupported(
