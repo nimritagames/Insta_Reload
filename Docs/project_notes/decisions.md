@@ -422,3 +422,43 @@ Format: date / decision / context / outcome
     instantiation with no call site anywhere still got patched.
   STILL OPEN: multiple type parameters, constraints (where T : struct), nested generic arguments,
     and a generic METHOD on a generic TYPE (both axes at once) are all untested.
+
+- Date: 2026-08-06
+  Decision: TESTED the four previously-untested generic combinations (feature/generic-methods,
+    commit 7f31f1d). 3 of 4 work. Measured in Play Mode, not reasoned about.
+  1. MULTIPLE TYPE PARAMETERS - WORKS, better than assumed. Mixed value/reference sets substitute
+     each argument individually:
+       <int,string>    (call site) = Int32+String
+       <string,float>  (call site) = String+Single
+       <string,object> (both ref)  = Object+Object   <- shared body
+       <long,long>     (NO site)   = old body        <- boundary, warned
+  2. CONSTRAINT where T : struct - WORKS. object is not a legal argument so there is NO shared
+     reference body; the catch for that fires and value instantiations are still hooked.
+     <int> patched, <float> (no call site) stale.
+  3. NESTED GENERIC ARGUMENT (Nested<List<int>>) - WORKS with no harvesting needed, because
+     List<T> is a REFERENCE type: the single shared hook covers <List<int>> AND <List<string>>.
+     typeof(T) still reports Object there, as documented.
+  4. GENERIC METHOD ON A GENERIC TYPE (Holder<T>.Both<U>) - FAILS. Predicted and confirmed.
+     Constructing the declaring type leaves the METHOD open and ILHook refuses:
+       "Both`1(T,U)|type<System.Int32> failed - Specified method is not supported."
+     FIX DIRECTION: after MethodBase.GetMethodFromHandle yields the method on the constructed type,
+     close the METHOD too via MakeGenericMethod. Needs the cross product of type args and method
+     args, and both substitution channels at once (GenericArguments + DeclaringTypeArguments) -
+     they exist but have only ever been exercised separately.
+  UNPREDICTED FAILURE, separate problem: a NON-generic method on a generic type whose body
+     CONSTRUCTS generic instantiations fails with a MONO runtime error, not a MonoMod one:
+       "HolderCallSites|type<System.Object> failed - Method with open type while not compiling gshared"
+     The body builds GenericHolder<int> and calls Both<float>. Creating closed instantiations
+     inside a shared (gshared) body appears to defeat the JIT. Failed safely. NOT diagnosed.
+  All four failures were loud and non-fatal - the per-instantiation reporting stated exactly what
+    was and was not covered, and the Editor survived throughout.
+
+- Date: 2026-08-06
+  Decision: WORKFLOW HAZARD introduced by tracking Docs/project_notes on dev only.
+  The notes are tracked on dev and NOT on feature branches, so `git checkout feature/...` DELETES
+    them from the working tree, and `git checkout dev` restores them. Nothing is lost (they live in
+    dev history) but a script writing to Docs/project_notes while on a feature branch fails with
+    FileNotFoundError - which happened. Also note the directory is `Docs` with a CAPITAL D as git
+    recorded it; a lowercase path silently matches nothing on Windows.
+  HOW TO WORK WITH IT: record branch findings in the COMMIT MESSAGE, then update the notes from
+    dev. Do not try to edit Docs/project_notes while on a feature branch.
