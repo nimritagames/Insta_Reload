@@ -11,11 +11,11 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 858a7cc57e635464c921ba5d20a57887, type: 3}
   m_Name: InstaReloadSettings
-  m_EditorClassIdentifier: 
+  m_EditorClassIdentifier: Nimrita.InstaReload.Editor::Nimrita.InstaReload.Editor.InstaReloadSettings
   enabled: 1
-  verboseLogging: 1
-  enabledLogLevels: -1
-  enabledLogCategories: -1
+  verboseLogging: 0
+  enabledLogLevels: 7
+  enabledLogCategories: 255
   autoApplyPlayModeSettings: 1
   useExternalWorker: 1
   autoStartWorker: 1
