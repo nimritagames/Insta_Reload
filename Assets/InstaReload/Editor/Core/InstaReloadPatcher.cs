@@ -731,8 +731,30 @@ namespace Nimrita.InstaReload.Editor
                             {
                                 try
                                 {
+                                    // ==== TEMPORARY EXPERIMENT (2026-08-05) - REVERT AFTER ====
+                                    // ILHook refuses an open generic definition, so hook a
+                                    // reference-type instantiation instead. Verified: one such hook
+                                    // covers ALL reference-type instantiations, including ones
+                                    // first used after the hook. Value types would each need their
+                                    // own and are not handled by this experiment.
+                                    var hookTarget = runtimeTargetMethod;
+                                    if (hookTarget is MethodInfo genericCandidate &&
+                                        genericCandidate.IsGenericMethodDefinition)
+                                    {
+                                        var parameters = genericCandidate.GetGenericArguments();
+                                        var referenceArgs = new Type[parameters.Length];
+                                        for (int g = 0; g < referenceArgs.Length; g++)
+                                        {
+                                            referenceArgs[g] = typeof(object);
+                                        }
+
+                                        hookTarget = genericCandidate.MakeGenericMethod(referenceArgs);
+                                        InstaReloadLogger.LogWarning(
+                                            $"[Patcher] EXPERIMENT: hooking generic {methodName} via <object> instantiation");
+                                    }
+
                                     var hook = new ILHook(
-                                        runtimeTargetMethod,
+                                        hookTarget,
                                         ctx => ReplaceMethodBody(ctx, method, runtimeAssembly, runtimeMethods, runtimeFields, methodIds, dispatchKeys, dispatcherInvokeMethod));
                                     if (_methodHooks.TryGetValue(key, out var existingHook))
                                     {
@@ -747,7 +769,7 @@ namespace Nimrita.InstaReload.Editor
                                 catch (Exception ex)
                                 {
                                     skipped++;
-                                    errors.Add($"{methodName}: {ex.Message}");
+                                    errors.Add($"{methodName}: {ex}");
                                 }
 
                                 continue;
@@ -1236,10 +1258,15 @@ namespace Nimrita.InstaReload.Editor
                     continue;
                 }
 
-                if (method.HasGenericParameters || method.DeclaringType.HasGenericParameters)
+                // ==== TEMPORARY EXPERIMENT (2026-08-05) - REVERT AFTER MEASURING ====
+                // Letting GENERIC METHODS through to find out whether our Cecil cloner can emit a
+                // valid body for one. Generic DECLARING TYPES stay skipped - harder case.
+                // ILHook refuses an open definition (NotSupportedException), so the patch site
+                // constructs a reference-type instantiation to hook.
+                if (method.DeclaringType.HasGenericParameters)
                 {
                     skippedGenerics?.Add(GetMethodKey(method));
-                    InstaReloadLogger.LogVerbose($"Skipping generic method: {GetMethodKey(method)}.");
+                    InstaReloadLogger.LogVerbose($"Skipping method on generic type: {GetMethodKey(method)}.");
                     continue;
                 }
 
@@ -2158,6 +2185,20 @@ namespace Nimrita.InstaReload.Editor
                 dispatcherInvokeMethod,
                 targetIncludesThis: false);
 
+            rewriteContext.TargetMethod = context.Method;
+
+            // EXPERIMENT diagnostic: is the body MonoMod hands us for a constructed generic
+            // instantiation still generic (T present), or already substituted? Determines whether
+            // position-mapping onto the target's own generic parameters is sufficient.
+            if (updatedMethod.HasGenericParameters)
+            {
+                InstaReloadLogger.LogWarning(
+                    $"[Patcher] EXPERIMENT generic clone: source={updatedMethod.Name} " +
+                    $"srcParams={updatedMethod.GenericParameters.Count} | " +
+                    $"target={context.Method.Name} targetGeneric={context.Method.HasGenericParameters} " +
+                    $"targetParams={context.Method.GenericParameters.Count}");
+            }
+
             CloneMethodBody(context.Method, updatedMethod, rewriteContext);
         }
 
@@ -2215,6 +2256,14 @@ namespace Nimrita.InstaReload.Editor
             public IReadOnlyDictionary<string, int> MethodIds { get; }
             public ISet<string> DispatchKeys { get; }
             public bool TargetIncludesThis { get; }
+
+            /// <summary>
+            /// The method being written into. Needed to resolve a source GENERIC PARAMETER (T):
+            /// Cecil's context-free ImportReference throws NullReferenceException on one, which is
+            /// what blocked generic-method patching. Settable rather than a constructor parameter
+            /// to keep this addition off an already-long signature.
+            /// </summary>
+            public MethodDefinition TargetMethod { get; set; }
             public MethodReference DispatcherInvoke { get; }
             public MethodReference TypeGetTypeFromHandle { get; }
             public MethodReference FieldStoreGetInstance { get; }
@@ -2911,6 +2960,38 @@ namespace Nimrita.InstaReload.Editor
 
         private static TypeReference ImportTypeReference(MethodRewriteContext context, TypeReference type)
         {
+            // A generic parameter (T) has no runtime Type and cannot be imported context-free -
+            // Cecil's ImportGenericContext.MethodParameter throws NullReferenceException. Substitute
+            // it before anything else touches it.
+            if (type is GenericParameter genericParameter)
+            {
+                return SubstituteGenericParameter(context, genericParameter);
+            }
+
+            // Composite types can HOLD a generic parameter (List<T>, T[], ref T), so recurse rather
+            // than handing the whole thing to ImportReference and hitting the same NRE.
+            if (type is GenericInstanceType genericInstance)
+            {
+                var importedElement = ImportTypeReference(context, genericInstance.ElementType);
+                var rebuilt = new GenericInstanceType(importedElement);
+                foreach (var argument in genericInstance.GenericArguments)
+                {
+                    rebuilt.GenericArguments.Add(ImportTypeReference(context, argument));
+                }
+
+                return rebuilt;
+            }
+
+            if (type is ArrayType arrayType)
+            {
+                return new ArrayType(ImportTypeReference(context, arrayType.ElementType), arrayType.Rank);
+            }
+
+            if (type is ByReferenceType byReferenceType)
+            {
+                return new ByReferenceType(ImportTypeReference(context, byReferenceType.ElementType));
+            }
+
             var runtimeType = ResolveRuntimeType(type, context.RuntimeAssembly);
             if (runtimeType != null)
             {
@@ -2918,6 +2999,31 @@ namespace Nimrita.InstaReload.Editor
             }
 
             return context.TargetModule.ImportReference(type);
+        }
+
+        /// <summary>
+        /// Maps a source generic parameter onto the target method being written into.
+        ///
+        /// Position-based, matching how the CLR identifies generic parameters. Method parameters map
+        /// onto the target method's own list; type parameters onto its declaring type's.
+        /// </summary>
+        private static TypeReference SubstituteGenericParameter(
+            MethodRewriteContext context,
+            GenericParameter parameter)
+        {
+            IGenericParameterProvider owner = parameter.Type == GenericParameterType.Method
+                ? context.TargetMethod
+                : (IGenericParameterProvider)context.TargetMethod?.DeclaringType;
+
+            if (owner != null && parameter.Position < owner.GenericParameters.Count)
+            {
+                return owner.GenericParameters[parameter.Position];
+            }
+
+            // The target carries no matching parameter, which happens when the body being written
+            // belongs to an already-substituted instantiation. We hook the <object> instantiation
+            // for reference-type sharing, so object is the correct stand-in there.
+            return context.TargetModule.ImportReference(typeof(object));
         }
 
         private static MethodReference ImportMethodReference(ModuleDefinition module, MethodInfo method)
