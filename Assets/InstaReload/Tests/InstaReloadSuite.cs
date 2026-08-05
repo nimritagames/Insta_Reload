@@ -37,6 +37,16 @@ namespace Nimrita.InstaReload.Tests
     /// ADDING A CASE: add a method returning Marker, call it from Evaluate with the expectation,
     /// and if it needs a value-type generic instantiation add a call site in CallSites so the
     /// harvester can see it.
+    ///
+    /// WHAT THIS DESIGN CANNOT COVER, and why - do not assume these are tested:
+    ///   * method REMOVAL and SIGNATURE CHANGE - need structurally different source, not a marker
+    ///     flip. Verified manually 2026-08-05.
+    ///   * BASE CLASS / INTERFACE changes - same reason; they are also refused-with-warning, so
+    ///     there is no observable behaviour change to grade.
+    ///   * NEW types and NEW fields - a marker flip does not add members.
+    ///   * REPLAY safety and the crash-loop guard - only observable across Editor sessions.
+    /// A green suite therefore means "no regression in what a marker flip can reach", not
+    /// "everything works".
     /// </summary>
     public sealed class InstaReloadSuite : MonoBehaviour
     {
@@ -206,59 +216,56 @@ namespace Nimrita.InstaReload.Tests
 
         private void Evaluate()
         {
-            var failures = new StringBuilder();
-            var passed = 0;
-            var total = 0;
+            var t = new Tally();
 
-            Check("plain body", PlainBody(), Expect.Patched, ref passed, ref total, failures);
-            Check("plain field", PlainField(), Expect.Patched, ref passed, ref total, failures);
-            Check("generic field List<int>", GenericField(), Expect.Patched, ref passed, ref total, failures);
-            Check("generic field Dictionary", GenericFieldTwoArgs(), Expect.Patched, ref passed, ref total, failures);
-            Check("generic parameter", GenericParameter(_list), Expect.Patched, ref passed, ref total, failures);
-            Check("lambda field", LambdaField(), Expect.Patched, ref passed, ref total, failures);
-            Check("property getter", Prop, Expect.Patched, ref passed, ref total, failures);
-            Check("event add accessor", _eventSeen, Expect.Patched, ref passed, ref total, failures);
-            Check("coroutine ongoing", _ongoingSeen, Expect.Patched, ref passed, ref total, failures);
-            Check("coroutine fresh", _freshSeen, Expect.Patched, ref passed, ref total, failures);
-
-            // async is REFUSED by design (0e910e9) - it cloned to invalid IL and crashed the Editor.
-            Check("async (refused)", _asyncSeen, Expect.Stale, ref passed, ref total, failures);
-
-            Check("generic method <string>", GenericMethod("x"), Expect.Patched, ref passed, ref total, failures);
-            Check("generic method <int>", GenericMethod(1), Expect.Patched, ref passed, ref total, failures);
-            Check("generic method <double> no call site", GenericMethod(1.0d), Expect.Stale, ref passed, ref total, failures);
-
-            Check("generic class <string>", new Boxed<string>().Read(), Expect.Patched, ref passed, ref total, failures);
-            Check("generic class <int>", new Boxed<int>().Read(), Expect.Patched, ref passed, ref total, failures);
-            Check("generic class new List<T>", new Boxed<int>().WithOpenList(), Expect.Patched, ref passed, ref total, failures);
+            // ---- proven working today ----
+            Check(t, "plain body", PlainBody(), Expect.Patched);
+            Check(t, "plain field", PlainField(), Expect.Patched);
+            Check(t, "generic field List<int>", GenericField(), Expect.Patched);
+            Check(t, "generic field Dictionary", GenericFieldTwoArgs(), Expect.Patched);
+            Check(t, "generic parameter", GenericParameter(_list), Expect.Patched);
+            Check(t, "lambda field", LambdaField(), Expect.Patched);
+            Check(t, "property getter", Prop, Expect.Patched);
+            Check(t, "event add accessor", _eventSeen, Expect.Patched);
+            Check(t, "coroutine ongoing", _ongoingSeen, Expect.Patched);
+            Check(t, "coroutine fresh", _freshSeen, Expect.Patched);
+            Check(t, "generic method <string>", GenericMethod("x"), Expect.Patched);
+            Check(t, "generic method <int>", GenericMethod(1), Expect.Patched);
+            Check(t, "generic class <string>", new Boxed<string>().Read(), Expect.Patched);
+            Check(t, "generic class <int>", new Boxed<int>().Read(), Expect.Patched);
+            Check(t, "generic class new List<T>", new Boxed<int>().WithOpenList(), Expect.Patched);
 
             var combos = new Combos();
-            Check("combo two type params", combos.TwoParams(1, "x"), Expect.Patched, ref passed, ref total, failures);
-            Check("combo where T : struct", combos.StructOnly(7), Expect.Patched, ref passed, ref total, failures);
-            Check("combo nested generic arg", combos.Nested(new List<int>()), Expect.Patched, ref passed, ref total, failures);
-            Check("constructs own generic type", combos.ConstructsOwnGeneric(), Expect.Patched, ref passed, ref total, failures);
+            Check(t, "combo two type params", combos.TwoParams(1, "x"), Expect.Patched);
+            Check(t, "combo where T : struct", combos.StructOnly(7), Expect.Patched);
+            Check(t, "combo nested generic arg", combos.Nested(new List<int>()), Expect.Patched);
+            Check(t, "constructs own generic type", combos.ConstructsOwnGeneric(), Expect.Patched);
 
-            // Both axes at once is a KNOWN failure - ILHook refuses a method left open after the
-            // declaring type is constructed.
-            Check("generic method on generic type", new Boxed<int>().BothAxes(1), Expect.Stale, ref passed, ref total, failures);
+            // ---- proven REFUSED today: these must stay stale ----
+            // async is refused because our Release emit makes the state machine a struct while
+            // Unity's build makes it a class (796b63e). A PASS here means the refusal still holds.
+            Check(t, "async (refused)", _asyncSeen, Expect.Stale);
+            Check(t, "generic method <double> no call site", GenericMethod(1.0d), Expect.Stale);
+            Check(t, "generic method on generic type", new Boxed<int>().BothAxes(1), Expect.Stale);
 
             var guard = _ongoingExited ? " GUARD-TRIPPED(iterator corrupted)" : string.Empty;
-            var verdict = passed == total ? "PASS" : "FAIL";
+            var verdict = t.Passed == t.Total ? "PASS" : "FAIL";
 
             Debug.Log(
-                $"[SUITE] {passed}/{total} {verdict} | marker={Marker}{guard} (frame {Time.frameCount})" +
-                (failures.Length > 0 ? "\n" + failures : string.Empty));
+                $"[SUITE] {t.Passed}/{t.Total} {verdict} | marker={Marker}{guard} (frame {Time.frameCount})" +
+                (t.Failures.Length > 0 ? "\n" + t.Failures : string.Empty));
         }
 
-        private void Check(
-            string name,
-            string observed,
-            Expect expect,
-            ref int passed,
-            ref int total,
-            StringBuilder failures)
+        private sealed class Tally
         {
-            total++;
+            public int Passed;
+            public int Total;
+            public readonly StringBuilder Failures = new StringBuilder();
+        }
+
+        private void Check(Tally tally, string name, string observed, Expect expect)
+        {
+            tally.Total++;
 
             // Patched: must report the CURRENT marker.
             // Stale:   must still report the marker compiled in before the edit. Equal at baseline,
@@ -269,11 +276,11 @@ namespace Nimrita.InstaReload.Tests
 
             if (ok)
             {
-                passed++;
+                tally.Passed++;
                 return;
             }
 
-            failures.AppendLine(
+            tally.Failures.AppendLine(
                 expect == Expect.Patched
                     ? $"   FAIL {name}: expected patched to \"{Marker}\", saw \"{observed}\""
                     : $"   FAIL {name}: expected STALE at \"{_baselineMarker}\" (documented limitation), saw \"{observed}\"");
