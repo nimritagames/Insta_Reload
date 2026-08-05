@@ -9,7 +9,7 @@ namespace Nimrita.InstaReload.Editor
     ///
     /// WHY THIS EXISTS:
     ///   The console previously reported only RoslynCompiler's own timing. Everything else
-    ///   in the pipeline (debounce, queue waits, main-thread pickup, patching, callbacks)
+    ///   in the pipeline (waiting, queue waits, main-thread pickup, patching, callbacks)
     ///   was invisible, so an 11ms compile could sit inside a multi-second felt latency
     ///   with nothing in the logs to show where the time went.
     /// </summary>
@@ -27,7 +27,7 @@ namespace Nimrita.InstaReload.Editor
         private readonly object _sync = new object();
 
         private double _detectedAtMs = NotStamped;
-        private double _debounceEndMs = NotStamped;
+        private double _pickupStartMs = NotStamped;
         private double _analyzeEndMs = NotStamped;
         private double _assemblyResolvedMs = NotStamped;
         private double _compileStartMs = NotStamped;
@@ -74,9 +74,9 @@ namespace Nimrita.InstaReload.Editor
             }
         }
 
-        internal void MarkDebounceEnd()
+        internal void MarkPickupStart()
         {
-            lock (_sync) { _debounceEndMs = Now; }
+            lock (_sync) { _pickupStartMs = Now; }
         }
 
         internal void MarkAnalyzeEnd(bool isFastPath)
@@ -159,8 +159,8 @@ namespace Nimrita.InstaReload.Editor
                     FilePath = FilePath,
                     IsFastPath = IsFastPath,
                     WatcherEventCount = _watcherEventCount,
-                    DebounceMs = SpanUnsafe(_detectedAtMs, _debounceEndMs),
-                    AnalyzeMs = SpanUnsafe(_debounceEndMs, _analyzeEndMs),
+                    WaitingMs = SpanUnsafe(_detectedAtMs, _pickupStartMs),
+                    AnalyzeMs = SpanUnsafe(_pickupStartMs, _analyzeEndMs),
                     AssemblyMs = SpanUnsafe(_analyzeEndMs, _assemblyResolvedMs),
                     QueueMs = _assemblyResolvedMs >= 0
                         ? SpanUnsafe(_assemblyResolvedMs, _compileStartMs)
@@ -177,7 +177,7 @@ namespace Nimrita.InstaReload.Editor
                 // pickup and patch start, temp-file IO, console rendering. If this number is
                 // large, the instrumentation is missing a real cost and should be extended.
                 var accounted =
-                    sample.DebounceMs + sample.AnalyzeMs + sample.AssemblyMs + sample.QueueMs +
+                    sample.WaitingMs + sample.AnalyzeMs + sample.AssemblyMs + sample.QueueMs +
                     sample.CompileMs + sample.PickupMs + sample.PatchMs + sample.PostPatchMs;
                 sample.UnaccountedMs = totalMs > accounted ? totalMs - accounted : 0d;
 
@@ -192,7 +192,7 @@ namespace Nimrita.InstaReload.Editor
             if (_pickupMs >= 0) return _pickupMs;
             if (_compileEndMs >= 0) return _compileEndMs;
             if (_analyzeEndMs >= 0) return _analyzeEndMs;
-            if (_debounceEndMs >= 0) return _debounceEndMs;
+            if (_pickupStartMs >= 0) return _pickupStartMs;
             return NotStamped;
         }
 
@@ -215,7 +215,7 @@ namespace Nimrita.InstaReload.Editor
         internal string FilePath { get; set; }
         internal bool IsFastPath { get; set; }
         internal int WatcherEventCount { get; set; }
-        internal double DebounceMs { get; set; }
+        internal double WaitingMs { get; set; }
         internal double AnalyzeMs { get; set; }
         internal double AssemblyMs { get; set; }
         internal double QueueMs { get; set; }
@@ -253,7 +253,7 @@ namespace Nimrita.InstaReload.Editor
         internal string BuildBreakdownLine()
         {
             return
-                $"debounce {DebounceMs:F0} | analyze {AnalyzeMs:F0} | assembly {AssemblyMs:F0} | queue {QueueMs:F0} | " +
+                $"waiting {WaitingMs:F0} | analyze {AnalyzeMs:F0} | assembly {AssemblyMs:F0} | queue {QueueMs:F0} | " +
                 $"compile {CompileMs:F0} | pickup {PickupMs:F0} | patch {PatchMs:F0} | " +
                 $"history {HistoryMs:F0} | callbacks {CallbacksMs:F0} | unaccounted {UnaccountedMs:F0}   " +
                 $"(watcher events: {WatcherEventCount})";

@@ -21,7 +21,7 @@
  * THE SOLUTION:
  *   Use FileSystemWatcher to monitor file system events:
  *   - Watch Assets/ folder for *.cs changes
- *   - Debounce events (wait for user to finish typing)
+ *   - Batch events per editor tick via a HashSet
  *   - Coordinate: ChangeAnalyzer → RoslynCompiler → InstaReloadPatcher
  *   - UnityCompilationSuppressor blocks Unity from interfering
  *
@@ -37,17 +37,15 @@
  *   1. User saves PlayerController.cs
  *   2. FileSystemWatcher fires Changed event
  *   3. Add to _changedFiles HashSet
- *   4. Record _lastChangeTime
- *   5. Wait 300ms (debounce - user might still be typing)
  *
- *   DEBOUNCE COMPLETE:
- *   6. EditorApplication.update checks time since last change
- *   7. If >300ms → process batch of changed files
- *   8. For each file:
+ *   NEXT EDITOR TICK:
+ *   4. EditorApplication.update picks up the batch (no typing debounce - see below)
+ *   5. Files that could not be read are requeued behind a 300ms backoff
+ *   6. For each file:
  *      a. ChangeAnalyzer: Determine fast path or slow path
  *      b. RoslynCompiler: Compile file (7ms or 700ms)
  *      c. InstaReloadPatcher: Patch IL into runtime
- *   9. Meanwhile, UnityCompilationSuppressor keeps Unity blocked!
+ *   7. Meanwhile, UnityCompilationSuppressor keeps Unity blocked!
  *
  * CRITICAL DECISIONS:
  *
@@ -57,12 +55,14 @@
  *   SOLUTION: FileSystemWatcher gives us OS-level file events
  *   RESULT: We detect changes BEFORE Unity (same events, we process first)
  *
- *   DECISION 2: 300ms Debounce Delay
- *   WHY: User types "Debug.Log" → 10+ file save events (auto-save)
- *   PROBLEM: Each event triggers compilation → 10+ compiles for one edit!
- *   SOLUTION: Wait 300ms after last event before processing
- *   RESULT: Batch all rapid edits into single compilation
- *   TRADEOFF: 300ms perceived latency (acceptable for human perception)
+ *   DECISION 2: No Typing Debounce (was intended, never actually ran)
+ *   WHY: a 300ms window was meant to batch rapid save events into one compile
+ *   PROBLEM: it was stamped on the FileSystemWatcher's background thread, where
+ *     EditorApplication.timeSinceStartup gives no usable value - so the window never waited
+ *     (measured 0-12ms against an intended 300ms). The code was removed in 2026-08.
+ *   RESULT: batching still happens, via the _changedFiles HashSet drained once per editor tick
+ *   NOTE: do not "restore" this without a decision - it would ADD 300ms to every reload, on a
+ *     pipeline whose entire end-to-end cost is ~59ms
  *
  *   DECISION 3: Skip Editor/ Folders
  *   WHY: Editor scripts run in edit mode, not play mode
@@ -97,13 +97,12 @@
  *
  * LIMITATIONS:
  *   - FileSystemWatcher requires file system access (works everywhere)
- *   - 300ms debounce adds perceived latency
  *   - Only works in play mode (by design)
  *   - Can't detect changes in Editor/ folders
  *
  * PERFORMANCE:
  *   - FileSystemWatcher overhead: <1ms (OS handles it)
- *   - Debounce check: <1ms (simple time comparison)
+ *   - Retry backoff check: <1ms (simple time comparison)
  *   - Fast path total: ~30ms (3ms analyze + 7ms compile + 20ms patch)
  *   - Slow path total: ~750ms (3ms analyze + 700ms compile + 50ms patch)
  *
@@ -116,7 +115,6 @@
  *
  * FUTURE IMPROVEMENTS:
  *   - Parallel compilation for multiple changed files
- *   - Configurable debounce delay
  *   - Edit mode hot reload (much more complex)
  *   - Visual progress indicator during compilation
  *   - Support for external editors (detect changes from VS Code, etc.)
@@ -176,13 +174,21 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
         // One timeline per file awaiting processing, opened by the first watcher event of a
         // burst so end-to-end latency is measured from the user's save, not from the moment
-        // the debounce window happened to close.
+        // the editor tick happened to pick the batch up.
         private static readonly Dictionary<string, ReloadTimeline> _pendingTimelines =
             new Dictionary<string, ReloadTimeline>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, int> _readRetryCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private static readonly object _lock = new object();
-        private static double _lastChangeTime;
-        private static readonly double _debounceDelay = 0.3; // 300ms debounce
+        // Backoff for files that could NOT be read and were requeued (editor still writing).
+        // Stamped only from the main thread, in ProcessChangedFiles and RequeueFile.
+        //
+        // This is NOT a typing debounce. One was intended, but it was stamped from the
+        // FileSystemWatcher's background thread where EditorApplication.timeSinceStartup does not
+        // return a usable value, so the window never waited (measured 0-12ms against an intended
+        // 300ms). That stamp is gone. Saves are processed on the next editor tick; only requeued
+        // files wait.
+        private static double _lastRetryQueuedTime;
+        private const double RetryBackoffSeconds = 0.3;
         private static bool _initialized;
         private const int MaxReadRetries = 3;
         private static readonly Queue<CompileJob> _pendingCompileJobs = new Queue<CompileJob>();
@@ -276,7 +282,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         /// <summary>
         /// Records a pending change and stamps its timeline. Runs on the FileSystemWatcher's
         /// background thread: the first event for a file opens its timeline (T0), later events
-        /// in the same burst only raise the event count and extend the debounce window.
+        /// in the same burst only raise the event count.
         /// </summary>
         private static void TrackChangedFile(string filePath)
         {
@@ -291,7 +297,6 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 timeline.MarkWatcherEvent();
-                _lastChangeTime = EditorApplication.timeSinceStartup;
             }
         }
 
@@ -356,9 +361,10 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 if (_changedFiles.Count > 0)
                 {
-                    // Debounce: wait for user to stop typing
-                    var timeSinceLastChange = EditorApplication.timeSinceStartup - _lastChangeTime;
-                    if (timeSinceLastChange >= _debounceDelay)
+                    // Zero on a normal save (never stamped), so this passes immediately. Only a
+                    // requeued file holds the batch back, giving the writer time to finish.
+                    var timeSinceRetry = EditorApplication.timeSinceStartup - _lastRetryQueuedTime;
+                    if (timeSinceRetry >= RetryBackoffSeconds)
                     {
                         // Process all changed files
                         filesToProcess = new List<string>(_changedFiles);
@@ -481,7 +487,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 try
                 {
                     var timeline = TakePendingTimeline(file);
-                    timeline.MarkDebounceEnd();
+                    timeline.MarkPickupStart();
 
                     var readStatus = TryReadSourceFile(file, out var sourceCode, out var readError);
                     if (readStatus != FileReadStatus.Success)
@@ -583,7 +589,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     {
                         _changedFiles.Add(retryFile);
                     }
-                    _lastChangeTime = EditorApplication.timeSinceStartup;
+                    _lastRetryQueuedTime = EditorApplication.timeSinceStartup;
                 }
             }
         }
@@ -886,6 +892,13 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 {
                     summary += $", trampolines {result.TrampolineCount}";
                 }
+
+                // A count of what was patched reads as success even when something was dropped,
+                // so anything skipped has to appear on the same line.
+                if (result.SkippedGenericMethods.Count > 0)
+                {
+                    summary += $" · {result.SkippedGenericMethods.Count} GENERIC SKIPPED";
+                }
             }
 
             InstaReloadLogger.Log(InstaReloadLogCategory.FileDetector, summary);
@@ -913,7 +926,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             lock (_lock)
             {
                 _changedFiles.Add(filePath);
-                _lastChangeTime = EditorApplication.timeSinceStartup;
+                _lastRetryQueuedTime = EditorApplication.timeSinceStartup;
             }
         }
 

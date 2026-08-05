@@ -386,7 +386,7 @@ namespace Nimrita.InstaReload.Editor.UI
 
             EditorGUILayout.Space(4);
 
-            DrawKeyValueRow("1. Debounce", FormatDuration(timing.DebounceMs));
+            DrawKeyValueRow("1. Waiting", FormatDuration(timing.WaitingMs));
             DrawKeyValueRow("2. Analyze", FormatDuration(timing.AnalyzeMs));
             DrawKeyValueRow("3. Assembly lookup", FormatDuration(timing.AssemblyMs));
             DrawKeyValueRow("4. Queue wait", FormatDuration(timing.QueueMs));
@@ -401,7 +401,7 @@ namespace Nimrita.InstaReload.Editor.UI
             if (timing.WatcherEventCount > 1)
             {
                 EditorGUILayout.HelpBox(
-                    $"This save fired {timing.WatcherEventCount} watcher events. Each one restarts the 300ms debounce window, so the debounce cost above is higher than a single-event save.",
+                    $"This save fired {timing.WatcherEventCount} watcher events (editor writing a temp file, then renaming). Waiting is measured from the FIRST one, so it reads higher than a single-event save.",
                     MessageType.Info);
             }
 

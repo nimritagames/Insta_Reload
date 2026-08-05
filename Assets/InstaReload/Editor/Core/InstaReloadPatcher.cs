@@ -617,7 +617,8 @@ namespace Nimrita.InstaReload.Editor
                             patchRecords[methodKey] = new MethodPatchRecord(methodKey, kind, runtimeMethod);
                         }
 
-                        foreach (var method in GetPatchableMethods(updatedModule))
+                        var skippedGenerics = new List<string>();
+                        foreach (var method in GetPatchableMethods(updatedModule, skippedGenerics))
                         {
                             var methodName = GetMethodKey(method);
 
@@ -836,6 +837,23 @@ namespace Nimrita.InstaReload.Editor
                             InstaReloadLogger.LogWarning($"[Patcher] No methods updated ({skipped} skipped)");
                         }
 
+                        // Generic methods never reach the patch loop, so they never increment
+                        // `skipped` — without this the reload reports a confident success while
+                        // silently leaving the edited method running its old body.
+                        if (skippedGenerics.Count > 0)
+                        {
+                            InstaReloadLogger.LogWarning(
+                                $"[Patcher] {skippedGenerics.Count} generic method(s) NOT patched - your edits to these have NO effect until you exit Play Mode:");
+                            foreach (var name in skippedGenerics.Take(3))
+                            {
+                                InstaReloadLogger.LogWarning($"  -> {name}");
+                            }
+                            if (skippedGenerics.Count > 3)
+                            {
+                                InstaReloadLogger.LogWarning($"  ... and {skippedGenerics.Count - 3} more");
+                            }
+                        }
+
                         if (errors.Count > 0)
                         {
                             InstaReloadLogger.LogError($"[Patcher] Failed to patch {errors.Count} method(s) in {_assemblyName}:");
@@ -858,7 +876,8 @@ namespace Nimrita.InstaReload.Editor
                             trampolines,
                             skipped,
                             errors,
-                            patchRecords.Values.ToList());
+                            patchRecords.Values.ToList(),
+                            skippedGenerics);
                     }
                 }
             }
@@ -1158,18 +1177,25 @@ namespace Nimrita.InstaReload.Editor
             return false;
         }
 
-        private static IEnumerable<MethodDefinition> GetPatchableMethods(ModuleDefinition module)
+        /// <param name="skippedGenerics">Optional collector. Generic methods are dropped here
+        /// before they ever reach the patch loop, so they never increment its skipped counter and
+        /// a reload that ignored them still reports success. Pass a list to make that visible.</param>
+        private static IEnumerable<MethodDefinition> GetPatchableMethods(
+            ModuleDefinition module,
+            List<string> skippedGenerics = null)
         {
             foreach (var type in module.Types)
             {
-                foreach (var method in GetPatchableMethods(type))
+                foreach (var method in GetPatchableMethods(type, skippedGenerics))
                 {
                     yield return method;
                 }
             }
         }
 
-        private static IEnumerable<MethodDefinition> GetPatchableMethods(TypeDefinition type)
+        private static IEnumerable<MethodDefinition> GetPatchableMethods(
+            TypeDefinition type,
+            List<string> skippedGenerics = null)
         {
             if (type.Name == "<Module>")
             {
@@ -1190,6 +1216,7 @@ namespace Nimrita.InstaReload.Editor
 
                 if (method.HasGenericParameters || method.DeclaringType.HasGenericParameters)
                 {
+                    skippedGenerics?.Add(GetMethodKey(method));
                     InstaReloadLogger.LogVerbose($"Skipping generic method: {GetMethodKey(method)}.");
                     continue;
                 }
@@ -1199,7 +1226,7 @@ namespace Nimrita.InstaReload.Editor
 
             foreach (var nested in type.NestedTypes)
             {
-                foreach (var method in GetPatchableMethods(nested))
+                foreach (var method in GetPatchableMethods(nested, skippedGenerics))
                 {
                     yield return method;
                 }

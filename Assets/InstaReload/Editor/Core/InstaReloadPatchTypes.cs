@@ -43,7 +43,8 @@ namespace Nimrita.InstaReload.Editor
             int trampolineCount,
             int skippedCount,
             IReadOnlyList<string> errors,
-            IReadOnlyList<MethodPatchRecord> methodPatches = null)
+            IReadOnlyList<MethodPatchRecord> methodPatches = null,
+            IReadOnlyList<string> skippedGenericMethods = null)
         {
             AssemblyName = assemblyName;
             RuntimeModuleMvid = runtimeModuleMvid;
@@ -54,6 +55,7 @@ namespace Nimrita.InstaReload.Editor
             SkippedCount = skippedCount;
             Errors = errors ?? Array.Empty<string>();
             MethodPatches = methodPatches ?? Array.Empty<MethodPatchRecord>();
+            SkippedGenericMethods = skippedGenericMethods ?? Array.Empty<string>();
         }
 
         public string AssemblyName { get; }
@@ -65,6 +67,10 @@ namespace Nimrita.InstaReload.Editor
         public int SkippedCount { get; }
         public IReadOnlyList<string> Errors { get; }
         public IReadOnlyList<MethodPatchRecord> MethodPatches { get; }
+
+        /// <summary>Generic methods filtered out before patching. Separate from SkippedCount
+        /// because they are dropped upstream and never reach the counter.</summary>
+        public IReadOnlyList<string> SkippedGenericMethods { get; }
 
         public bool AppliedAny => PatchedCount > 0 || DispatchedCount > 0 || TrampolineCount > 0;
     }
