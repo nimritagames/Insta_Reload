@@ -80,12 +80,12 @@ namespace Nimrita.InstaReload.Tests
     /// TYPE (Boxed&lt;T&gt;.BothAxes&lt;U&gt;): the patcher refuses it loudly - "NO instantiation
     /// patched" - so it stays Stale.
     ///
-    /// EXPECTED LEAK, one line, until the token fall-through is fixed: "generic method on generic
-    /// type" prints a LEAK because the patcher refuses BothAxes while the DIRECT call site in
-    /// patched Evaluate still binds to the hot assembly's copy - so the call site reports M1 while
-    /// the runtime method correctly reports the old marker. The graded value is the runtime one, so
-    /// the case still passes. That LEAK line disappears when CloneInstruction stops falling through
-    /// to the hot assembly on a lookup miss. A leak on ANY OTHER case is new and worth chasing.
+    /// NO LEAK LINE SHOULD EVER PRINT NOW. The token fall-through behind them was fixed on
+    /// 2026-08-06 (NeedsRuntimeRetarget): generic newobj and generic call sites are rebuilt against
+    /// the runtime type instead of staying bound to the freshly compiled assembly. Before that fix
+    /// this header documented one expected LEAK on "generic method on generic type", and a session's
+    /// second reload printed ten. Both are gone, across three generations. ANY leak line is now a
+    /// regression - chase it.
     ///
     /// ONE-CYCLE SETTLE, not a bug: "coroutine ongoing" can report the PREVIOUS marker on the first
     /// grade after a patch. OngoingCoroutine resumes every 0.25s, so if the first Evaluate after a

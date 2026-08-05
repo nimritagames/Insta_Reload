@@ -156,6 +156,18 @@ Format: date / task / status
   Files: Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs,
     Assets/InstaReload/Tests/InstaReloadSuite.cs
 
+- Date: 2026-08-06
+  Task: Fix the two remaining generic call-site bugs (hot-copy calls, one-generation lag)
+  Status: Done - a5499bd, verified in Play Mode across three generations plus the newobj check
+  Notes: They were ONE bug, and the same one as the newobj fall-through: a generic method reference
+    stayed bound to the assembly just compiled instead of being rebuilt against the runtime type.
+    NeedsRuntimeRetarget now covers generic instantiations of our types AND generic methods on our
+    types, every opcode; external generics excluded. Every LEAK line is gone - gen1 and gen2 were
+    1 and 10 before. The suite header now says any leak at all is a regression.
+    Two dead ends recorded in bugs.md: declaring-type-only retarget (made it worse, six new leaks)
+    and per-reference-type instantiation hooking (green, but A/B showed it was not load-bearing).
+  Files: Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs
+
 ## Improvement Backlog
 
 - LATENCY WORK IS DONE (2026-08-05). 7365ms -> ~59ms, 125x. Noise floor reached: identical work
