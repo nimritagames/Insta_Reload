@@ -192,7 +192,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
             try
             {
-                InstaReloadLogger.Log("[Roslyn] Initializing...");
+                InstaReloadLogger.LogVerbose("[Roslyn] Initializing...");
 
                 // Step 1: Ensure Roslyn is loaded
                 if (!EnsureRoslynLoaded())
@@ -265,7 +265,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     _fastPathCompilation = createMethod.Invoke(null, fastArgs);
                     if (_fastPathCompilation != null)
                     {
-                        InstaReloadLogger.Log("[Roslyn] Fast path compilation created with Debug optimization");
+                        InstaReloadLogger.LogVerbose("[Roslyn] Fast path compilation created with Debug optimization");
                     }
                 }
                 else
@@ -275,7 +275,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 _initialized = true;
-                InstaReloadLogger.Log($"[Roslyn] ✓ Initialized successfully!");
+                InstaReloadLogger.LogVerbose($"[Roslyn] ✓ Initialized successfully!");
                 return true;
             }
             catch (Exception ex)
@@ -435,8 +435,8 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
 
             var pathType = result.UsedFastPath ? "FAST PATH" : "Normal";
-            InstaReloadLogger.Log($"[Roslyn] ✓ {pathType} compiled in {result.CompilationTime:F0}ms ({result.OutputSize} bytes)");
-            InstaReloadLogger.Log($"[Roslyn]   → Parse: {result.ParseTimeMs:F0}ms | AddTree: {result.AddTreeTimeMs:F0}ms | Emit: {result.EmitTimeMs:F0}ms");
+            InstaReloadLogger.LogVerbose($"[Roslyn] ✓ {pathType} compiled in {result.CompilationTime:F0}ms ({result.OutputSize} bytes)");
+            InstaReloadLogger.LogVerbose($"[Roslyn]   → Parse: {result.ParseTimeMs:F0}ms | AddTree: {result.AddTreeTimeMs:F0}ms | Emit: {result.EmitTimeMs:F0}ms");
         }
 
         private static bool EnsureRoslynLoaded()
@@ -444,12 +444,12 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             // Check if already loaded in AppDomain
             if (HasRoslynAssembliesLoaded())
             {
-                InstaReloadLogger.Log("[Roslyn] Found in AppDomain (loaded by Unity)");
+                InstaReloadLogger.LogVerbose("[Roslyn] Found in AppDomain (loaded by Unity)");
                 return true;
             }
 
             // Try loading from Unity installation
-            InstaReloadLogger.Log("[Roslyn] Not in AppDomain, searching Unity installation...");
+            InstaReloadLogger.LogVerbose("[Roslyn] Not in AppDomain, searching Unity installation...");
 
             var contentsPath = UnityEditor.EditorApplication.applicationContentsPath;
             var candidateDirectories = new[]
@@ -465,7 +465,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 {
                     if (HasRoslynAssembliesLoaded())
                     {
-                        InstaReloadLogger.Log($"[Roslyn] Loaded from: {directory}");
+                        InstaReloadLogger.LogVerbose($"[Roslyn] Loaded from: {directory}");
                         return true;
                     }
                 }
@@ -477,7 +477,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             {
                 if (HasRoslynAssembliesLoaded())
                 {
-                    InstaReloadLogger.Log($"[Roslyn] Loaded from manual installation");
+                    InstaReloadLogger.LogVerbose($"[Roslyn] Loaded from manual installation");
                     return true;
                 }
             }
@@ -494,7 +494,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             if (coreAssembly != null && csharpAssembly != null)
             {
                 var version = coreAssembly.GetName().Version;
-                InstaReloadLogger.Log($"[Roslyn] Using Microsoft.CodeAnalysis version {version}");
+                InstaReloadLogger.LogVerbose($"[Roslyn] Using Microsoft.CodeAnalysis version {version}");
                 return true;
             }
 
@@ -573,7 +573,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     array.SetValue(referenceList[i], i);
                 }
 
-                InstaReloadLogger.Log($"[Roslyn] Metadata references collected: {referenceList.Count} (cached)");
+                InstaReloadLogger.LogVerbose($"[Roslyn] Metadata references collected: {referenceList.Count} (cached)");
 
                 // Cache forever - references don't change during session
                 _cachedMetadataReferences = array;

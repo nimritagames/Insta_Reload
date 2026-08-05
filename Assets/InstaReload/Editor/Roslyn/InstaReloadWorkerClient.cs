@@ -646,15 +646,18 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             }
         }
 
+        // Worker adopt/spawn/warmup are routine now that persistence is proven, so they sit at
+        // Verbose: available when the worker misbehaves, silent when it does not. Anything that
+        // actually went wrong goes through LogLifecycleWarning instead.
         private static void LogLifecycle(string message)
         {
             if (IsMainThread())
             {
-                InstaReloadLogger.Log(InstaReloadLogCategory.General, $"[Worker] {message}");
+                InstaReloadLogger.LogVerbose(InstaReloadLogCategory.General, $"[Worker] {message}");
                 return;
             }
 
-            EnqueueMainThread(() => InstaReloadLogger.Log(InstaReloadLogCategory.General, $"[Worker] {message}"));
+            EnqueueMainThread(() => InstaReloadLogger.LogVerbose(InstaReloadLogCategory.General, $"[Worker] {message}"));
         }
 
         private static void LogLifecycleWarning(string message)

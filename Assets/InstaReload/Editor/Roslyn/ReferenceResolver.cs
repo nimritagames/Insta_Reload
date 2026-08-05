@@ -38,7 +38,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
             _cachedReferences = references.ToList();
 
-            InstaReloadLogger.Log($"[Roslyn] Found {_cachedReferences.Count} assembly references");
+            InstaReloadLogger.LogVerbose($"[Roslyn] Found {_cachedReferences.Count} assembly references");
             return _cachedReferences;
         }
 

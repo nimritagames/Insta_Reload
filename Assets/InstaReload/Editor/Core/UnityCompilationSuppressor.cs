@@ -219,9 +219,9 @@ namespace Nimrita.InstaReload.Editor
                     InstaReloadLogger.LogWarning($"[Suppressor] Failed to reset dispatcher: {ex.Message}");
                 }
 
-                InstaReloadLogger.Log("[Suppressor] ✓ Unity compilation BLOCKED");
-                InstaReloadLogger.Log("[Suppressor]   → AssetDatabase auto-refresh: DISABLED");
-                InstaReloadLogger.Log("[Suppressor]   → Assembly reload: LOCKED");
+                InstaReloadLogger.LogVerbose("[Suppressor] ✓ Unity compilation BLOCKED");
+                InstaReloadLogger.LogVerbose("[Suppressor]   → AssetDatabase auto-refresh: DISABLED");
+                InstaReloadLogger.LogVerbose("[Suppressor]   → Assembly reload: LOCKED");
             }
             catch (System.Exception ex)
             {
@@ -254,8 +254,8 @@ namespace Nimrita.InstaReload.Editor
 
                 _isLocked = false;
 
-                InstaReloadLogger.Log("[Suppressor] ✓ Unity compilation RESTORED");
-                InstaReloadLogger.Log("[Suppressor]   → Processing pending changes...");
+                InstaReloadLogger.LogVerbose("[Suppressor] ✓ Unity compilation RESTORED");
+                InstaReloadLogger.LogVerbose("[Suppressor]   → Processing pending changes...");
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Play Mode ended");
 
                 // The worker is deliberately NOT shut down here. It is a separate process that
@@ -263,7 +263,7 @@ namespace Nimrita.InstaReload.Editor
                 // costing ~850ms on the first save of every play session. It self-terminates
                 // when Unity exits (spawned with --parentPid), and the next play session adopts
                 // it over the loopback port instead of spawning a cold one.
-                InstaReloadLogger.Log("[Suppressor]   → Worker left running to stay warm");
+                InstaReloadLogger.LogVerbose("[Suppressor]   → Worker left running to stay warm");
             }
             catch (System.Exception ex)
             {

@@ -161,7 +161,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                         }
 
                         entry.ExtractToFile(destPath, true);
-                        InstaReloadLogger.Log($"[Roslyn] Extracted: {entry.Name}");
+                        InstaReloadLogger.LogVerbose($"[Roslyn] Extracted: {entry.Name}");
                     }
                 }
             }

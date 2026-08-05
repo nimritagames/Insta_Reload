@@ -557,7 +557,7 @@ namespace Nimrita.InstaReload.Editor
                         }
                     }
 
-                    InstaReloadLogger.Log($"[ChangeAnalyzer] Loaded {_signatureCache.Count} signatures from cache");
+                    InstaReloadLogger.LogVerbose($"[ChangeAnalyzer] Loaded {_signatureCache.Count} signatures from cache");
                 }
                 catch (Exception ex)
                 {

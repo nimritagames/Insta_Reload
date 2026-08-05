@@ -522,7 +522,7 @@ namespace Nimrita.InstaReload.Editor
                     {
                         // Fast path: ChangeAnalyzer already confirmed only method bodies changed,
                         // so no new types are possible and structural validation can be skipped.
-                        InstaReloadLogger.Log("[Patcher] ⚡ Fast path - skipping structural validation (trusted)");
+                        InstaReloadLogger.LogVerbose("[Patcher] ⚡ Fast path - skipping structural validation (trusted)");
                     }
 
                     // Load the compiled assembly into the AppDomain AFTER validation so we
@@ -539,7 +539,7 @@ namespace Nimrita.InstaReload.Editor
                     {
                         var assemblyBytes = System.IO.File.ReadAllBytes(assemblyPath);
                         hotAssembly = System.Reflection.Assembly.Load(assemblyBytes);
-                        InstaReloadLogger.Log($"[Patcher] Hot assembly loaded: {hotAssembly.GetName().Name}");
+                        InstaReloadLogger.LogVerbose($"[Patcher] Hot assembly loaded: {hotAssembly.GetName().Name}");
                     }
                     catch (Exception ex)
                     {
@@ -817,7 +817,10 @@ namespace Nimrita.InstaReload.Editor
                             {
                                 message += $", trampolines: {trampolines}";
                             }
-                            InstaReloadLogger.Log(message);
+                            // Counts also travel out on PatchApplyResult and are printed by the
+                            // single per-reload summary line, so this stays available for
+                            // debugging without duplicating that line.
+                            InstaReloadLogger.LogVerbose(message);
 
                             var overlayType = System.Type.GetType("Nimrita.InstaReload.Editor.UI.InstaReloadStatusOverlay, InstaReload.Editor");
                             if (overlayType != null)

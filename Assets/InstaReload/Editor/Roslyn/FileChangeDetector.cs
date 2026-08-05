@@ -308,13 +308,13 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             if (!ShouldProcessFile(e.FullPath))
                 return;
 
-            InstaReloadLogger.Log($"[FileDetector] New file created: {Path.GetFileName(e.FullPath)}");
+            InstaReloadLogger.LogVerbose($"[FileDetector] New file created: {Path.GetFileName(e.FullPath)}");
             TrackChangedFile(e.FullPath);
         }
 
         private static void OnFileRenamed(object sender, RenamedEventArgs e)
         {
-            InstaReloadLogger.Log($"[FileDetector] File renamed: {Path.GetFileName(e.OldFullPath)} → {Path.GetFileName(e.FullPath)}");
+            InstaReloadLogger.LogVerbose($"[FileDetector] File renamed: {Path.GetFileName(e.OldFullPath)} → {Path.GetFileName(e.FullPath)}");
             if (!ShouldProcessFile(e.FullPath))
             {
                 return;
@@ -514,12 +514,12 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                         continue;
                     }
 
-                    InstaReloadLogger.Log($"[FileDetector] Detected change: {Path.GetFileName(file)}");
+                    InstaReloadLogger.LogVerbose($"[FileDetector] Detected change: {Path.GetFileName(file)}");
 
                     // CRITICAL: Analyze BEFORE compiling (this is what was missing!)
                     var analysis = ChangeAnalyzer.Analyze(file, sourceCode);
 
-                    InstaReloadLogger.Log($"[FileDetector] Analysis: {analysis.Type} - {analysis.Reason}");
+                    InstaReloadLogger.LogVerbose($"[FileDetector] Analysis: {analysis.Type} - {analysis.Reason}");
 
                     if (analysis.Type == ChangeAnalyzer.ChangeType.None)
                     {
@@ -535,7 +535,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
                     if (isFastPath)
                     {
-                        InstaReloadLogger.Log($"[FileDetector] FAST PATH - Method body only (trusted compilation)");
+                        InstaReloadLogger.LogVerbose($"[FileDetector] FAST PATH - Method body only (trusted compilation)");
                     }
 
                     // Try Roslyn compilation for hot reload
@@ -746,7 +746,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             if (result.Success && result.CompiledAssembly != null && result.CompiledAssembly.Length > 0)
             {
                 RoslynCompiler.LogCompilationResult(result);
-                InstaReloadLogger.Log($"[FileDetector] Roslyn compiled in {result.CompilationTime:F0}ms");
+                InstaReloadLogger.LogVerbose($"[FileDetector] Roslyn compiled in {result.CompilationTime:F0}ms");
 
                 if (!IsSourceStillCurrent(job))
                 {
@@ -853,11 +853,19 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         }
 
         /// <summary>
-        /// Closes out a reload's timeline: feeds it to the session metrics and prints the
-        /// end-to-end breakdown. This total is what "instant" is measured against — the
-        /// compile number alone covers a single stage of the pipeline.
+        /// Closes out a reload's timeline: feeds it to the session metrics and prints the ONE
+        /// Info line a successful reload is allowed to emit — file, end-to-end total, path and
+        /// what actually changed. The total is what "instant" is measured against; the compile
+        /// number alone covers a single stage of the pipeline.
+        ///
+        /// Everything finer-grained (stage breakdown, patch phases) stays at Verbose so the
+        /// console reads as a log of reloads rather than a log of pipeline internals. Turn
+        /// Verbose on in InstaReload settings when a number needs chasing.
         /// </summary>
-        private static void ReportTimeline(ReloadTimeline timeline, PatchPhaseTimings patchPhases = null)
+        private static void ReportTimeline(
+            ReloadTimeline timeline,
+            PatchPhaseTimings patchPhases = null,
+            PatchApplyResult result = null)
         {
             if (timeline == null)
             {
@@ -870,10 +878,18 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             InstaReloadSessionMetrics.RecordTimeline(sample);
 
             var pathLabel = sample.IsFastPath ? "fast" : "slow";
-            InstaReloadLogger.Log(
-                InstaReloadLogCategory.FileDetector,
-                $"[Timing] {sample.FileName} — TOTAL {sample.TotalMs:F0}ms ({pathLabel} path)");
-            InstaReloadLogger.Log(
+            var summary = $"[InstaReload] {sample.FileName} — {sample.TotalMs:F0}ms ({pathLabel} path)";
+            if (result != null)
+            {
+                summary += $" · patched {result.PatchedCount}, dispatched {result.DispatchedCount}";
+                if (result.TrampolineCount > 0)
+                {
+                    summary += $", trampolines {result.TrampolineCount}";
+                }
+            }
+
+            InstaReloadLogger.Log(InstaReloadLogCategory.FileDetector, summary);
+            InstaReloadLogger.LogVerbose(
                 InstaReloadLogCategory.FileDetector,
                 $"[Timing]   → {sample.BuildBreakdownLine()}");
 
@@ -881,7 +897,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             // next optimisation to guesswork.
             if (patchPhases != null)
             {
-                InstaReloadLogger.Log(
+                InstaReloadLogger.LogVerbose(
                     InstaReloadLogCategory.FileDetector,
                     $"[Timing]   → patch: {patchPhases.BuildLine()}");
             }
@@ -937,7 +953,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 // For fast path: skip expensive structural validation (we trust ChangeAnalyzer)
                 if (isFastPath)
                 {
-                    InstaReloadLogger.Log("[FileDetector] Applying patches with fast path (skipping validation)");
+                    InstaReloadLogger.LogVerbose("[FileDetector] Applying patches with fast path (skipping validation)");
                 }
 
                 InstaReloadSessionMetrics.RecordPatchStart(assemblyName);
@@ -984,7 +1000,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     InstaReloadStatusOverlay.ShowMessage("Hot reload failed - see Console", false);
                 }
 
-                ReportTimeline(timeline, patcher.LastPhaseTimings);
+                ReportTimeline(timeline, patcher.LastPhaseTimings, result);
 
                 // Clean up temp file
                 try
@@ -1115,7 +1131,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     return;
                 }
 
-                InstaReloadLogger.Log($"[FileDetector] Replaying {records.Count} cached patch(es)");
+                InstaReloadLogger.LogVerbose($"[FileDetector] Replaying {records.Count} cached patch(es)");
 
                 // Replay runs on the Play-mode-enter path, so its cost is felt as slow entry
                 // rather than slow reload. Timed separately from the save -> patch timeline.
@@ -1162,7 +1178,7 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 replayStopwatch.Stop();
-                InstaReloadLogger.Log(
+                InstaReloadLogger.LogVerbose(
                     InstaReloadLogCategory.FileDetector,
                     $"[Timing] Patch replay ({records.Count} record(s)) took {replayStopwatch.Elapsed.TotalMilliseconds:F0}ms — added to Play mode entry");
             }
