@@ -627,6 +627,7 @@ namespace Nimrita.InstaReload.Editor
                         // Discovered once for the whole assembly: which value-type instantiations
                         // exist at call sites. Reference-type instantiations need no discovery.
                         var genericInstantiations = CollectGenericInstantiations(updatedModule);
+                        var genericTypeInstantiations = CollectGenericTypeInstantiations(updatedModule);
 
                         foreach (var method in GetPatchableMethods(updatedModule, skippedGenerics))
                         {
@@ -741,6 +742,37 @@ namespace Nimrita.InstaReload.Editor
                                     // across all reference-type instantiations, and gives each
                                     // value-type instantiation its own. So hook a SET of concrete
                                     // instantiations, each under its own key.
+                                    // A method whose TYPE is generic: construct the declaring type
+                                    // first, since an open definition has no native code.
+                                    if (runtimeTargetMethod.DeclaringType != null &&
+                                        runtimeTargetMethod.DeclaringType.IsGenericTypeDefinition)
+                                    {
+                                        var installedOnType = ApplyGenericTypeMethodHooks(
+                                            runtimeTargetMethod,
+                                            method,
+                                            key,
+                                            methodName,
+                                            genericTypeInstantiations,
+                                            runtimeAssembly,
+                                            runtimeMethods,
+                                            runtimeFields,
+                                            methodIds,
+                                            dispatchKeys,
+                                            dispatcherInvokeMethod);
+
+                                        if (installedOnType > 0)
+                                        {
+                                            patched++;
+                                            RecordPatch(key, HotReloadPatchKind.Patched, runtimeTargetMethod);
+                                        }
+                                        else
+                                        {
+                                            skipped++;
+                                        }
+
+                                        continue;
+                                    }
+
                                     if (runtimeTargetMethod is MethodInfo genericDefinition &&
                                         genericDefinition.IsGenericMethodDefinition)
                                     {
@@ -1316,6 +1348,192 @@ namespace Nimrita.InstaReload.Editor
         }
 
         /// <summary>
+        /// Every generic TYPE instantiation appearing in the updated assembly, keyed by the open
+        /// type's full name. Same reasoning as the method case: Mono shares one body across the
+        /// reference-type instantiations of a generic type and specialises each value-type one.
+        ///
+        /// Records both direct type operands (newobj, castclass, newarr) and the declaring type of
+        /// member references (a call to Container-of-int's method, a field access on it).
+        /// </summary>
+        private static Dictionary<string, List<TypeReference[]>> CollectGenericTypeInstantiations(
+            ModuleDefinition module)
+        {
+            var result = new Dictionary<string, List<TypeReference[]>>(StringComparer.Ordinal);
+
+            void Record(TypeReference candidate)
+            {
+                if (!(candidate is GenericInstanceType instance))
+                {
+                    return;
+                }
+
+                var openName = NormalizeTypeName(instance.ElementType.FullName);
+                if (!result.TryGetValue(openName, out var list))
+                {
+                    result[openName] = list = new List<TypeReference[]>();
+                }
+
+                list.Add(instance.GenericArguments.ToArray());
+            }
+
+            foreach (var type in GetAllTypes(module))
+            {
+                foreach (var method in type.Methods)
+                {
+                    if (!method.HasBody)
+                    {
+                        continue;
+                    }
+
+                    foreach (var instruction in method.Body.Instructions)
+                    {
+                        // TypeReference derives from MemberReference in Cecil, so it has to be
+                        // tested first or every type operand falls into the member branch.
+                        if (instruction.Operand is TypeReference typeOperand)
+                        {
+                            Record(typeOperand);
+                        }
+                        else if (instruction.Operand is MemberReference member)
+                        {
+                            Record(member.DeclaringType);
+                        }
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Installs one ILHook per constructed declaring type, for a method whose TYPE is generic.
+        /// An open type definition has no native code, so the type must be constructed first.
+        /// </summary>
+        private int ApplyGenericTypeMethodHooks(
+            MethodBase openRuntimeMethod,
+            MethodDefinition updatedMethod,
+            string key,
+            string methodName,
+            IReadOnlyDictionary<string, List<TypeReference[]>> typeInstantiations,
+            Assembly runtimeAssembly,
+            IReadOnlyDictionary<string, MethodBase> runtimeMethods,
+            IReadOnlyDictionary<string, FieldInfo> runtimeFields,
+            IReadOnlyDictionary<string, int> methodIds,
+            ISet<string> dispatchKeys,
+            MethodInfo dispatcherInvokeMethod)
+        {
+            var openType = openRuntimeMethod.DeclaringType;
+            if (openType == null || !openType.IsGenericTypeDefinition)
+            {
+                return 0;
+            }
+
+            var arity = openType.GetGenericArguments().Length;
+            var argumentSets = new List<Type[]>();
+            var coveredValueTypes = new List<string>();
+
+            var referenceArgs = new Type[arity];
+            for (int i = 0; i < arity; i++)
+            {
+                referenceArgs[i] = typeof(object);
+            }
+
+            argumentSets.Add(referenceArgs);
+
+            if (typeInstantiations != null &&
+                typeInstantiations.TryGetValue(NormalizeTypeName(openType.FullName), out var found))
+            {
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var candidate in found)
+                {
+                    if (candidate.Length != arity)
+                    {
+                        continue;
+                    }
+
+                    var resolvedArgs = new Type[arity];
+                    var resolved = true;
+                    var anyValueType = false;
+                    for (int i = 0; i < arity; i++)
+                    {
+                        var argument = ResolveRuntimeType(candidate[i], runtimeAssembly);
+                        if (argument == null)
+                        {
+                            resolved = false;
+                            break;
+                        }
+
+                        resolvedArgs[i] = argument;
+                        anyValueType |= argument.IsValueType;
+                    }
+
+                    // All-reference sets are already served by the shared hook.
+                    if (!resolved || !anyValueType)
+                    {
+                        continue;
+                    }
+
+                    var signature = string.Join(",", resolvedArgs.Select(t => t.FullName));
+                    if (seen.Add(signature))
+                    {
+                        argumentSets.Add(resolvedArgs);
+                        coveredValueTypes.Add(signature);
+                    }
+                }
+            }
+
+            var installed = 0;
+            foreach (var argumentSet in argumentSets)
+            {
+                var hookKey = key + "|type<" + string.Join(",", argumentSet.Select(t => t.FullName)) + ">";
+                try
+                {
+                    var constructedType = openType.MakeGenericType(argumentSet);
+
+                    // The same method as it exists on the CONSTRUCTED type - that is where the
+                    // native code lives.
+                    var target = MethodBase.GetMethodFromHandle(
+                        openRuntimeMethod.MethodHandle,
+                        constructedType.TypeHandle);
+
+                    var declaringArgs = argumentSet;
+                    var hook = new ILHook(
+                        target,
+                        ctx => ReplaceMethodBody(ctx, updatedMethod, runtimeAssembly, runtimeMethods, runtimeFields, methodIds, dispatchKeys, dispatcherInvokeMethod, null, declaringArgs));
+
+                    if (_methodHooks.TryGetValue(hookKey, out var existing))
+                    {
+                        existing.Dispose();
+                        _methodHooks.Remove(hookKey);
+                    }
+
+                    _methodHooks[hookKey] = hook;
+                    installed++;
+                }
+                catch (Exception ex)
+                {
+                    InstaReloadLogger.LogWarning($"[Patcher] generic type {hookKey} failed - {ex.Message}");
+                }
+            }
+
+            if (installed == 0)
+            {
+                InstaReloadLogger.LogWarning(
+                    $"[Patcher] generic type method {methodName}: NO instantiation patched - keeps its old body until you exit Play Mode");
+                return 0;
+            }
+
+            var valueTypeSummary = coveredValueTypes.Count == 0
+                ? "no value-type instantiations found"
+                : $"value types covered: {string.Join(" | ", coveredValueTypes)}";
+
+            InstaReloadLogger.LogWarning(
+                $"[Patcher] generic type method {methodName}: patched {installed} instantiation(s) - all reference types, {valueTypeSummary}. " +
+                "A value-type instantiation not referenced in this assembly keeps the old body.");
+
+            return installed;
+        }
+
+        /// <summary>
         /// Every generic-method instantiation that appears at a CALL SITE in the updated assembly,
         /// keyed by the element method's key.
         ///
@@ -1501,12 +1719,9 @@ namespace Nimrita.InstaReload.Editor
                 // Generic METHODS are supported: the patch site hooks concrete instantiations
                 // (ILHook refuses an open definition) and the cloner substitutes T. Methods on a
                 // generic DECLARING TYPE are still skipped - untested, harder case.
-                if (method.DeclaringType.HasGenericParameters)
-                {
-                    skippedGenerics?.Add(GetMethodKey(method));
-                    InstaReloadLogger.LogVerbose($"Skipping method on generic type: {GetMethodKey(method)}.");
-                    continue;
-                }
+                // Methods on a generic DECLARING type are supported too: the patch site constructs
+                // the type (Container<object>, Container<int>) before hooking, because an open type
+                // definition has no native code to attach to.
 
                 yield return method;
             }
@@ -2416,7 +2631,8 @@ namespace Nimrita.InstaReload.Editor
             IReadOnlyDictionary<string, int> methodIds,
             ISet<string> dispatchKeys,
             MethodInfo dispatcherInvokeMethod,
-            Type[] genericArguments = null)
+            Type[] genericArguments = null,
+            Type[] declaringTypeArguments = null)
         {
             var rewriteContext = new MethodRewriteContext(
                 context.Method.Module,
@@ -2430,6 +2646,7 @@ namespace Nimrita.InstaReload.Editor
 
             rewriteContext.TargetMethod = context.Method;
             rewriteContext.GenericArguments = genericArguments;
+            rewriteContext.DeclaringTypeArguments = declaringTypeArguments;
 
             CloneMethodBody(context.Method, updatedMethod, rewriteContext);
         }
@@ -2501,6 +2718,10 @@ namespace Nimrita.InstaReload.Editor
             /// generic parameter resolve to the REAL type (Int32 for the &lt;int&gt; hook) instead of
             /// collapsing every instantiation to object.</summary>
             public Type[] GenericArguments { get; set; }
+
+            /// <summary>Actual type arguments of the constructed DECLARING type, or null. Resolves a
+            /// type-level parameter to the real type (Int32 for Container-of-int).</summary>
+            public Type[] DeclaringTypeArguments { get; set; }
             public MethodReference DispatcherInvoke { get; }
             public MethodReference TypeGetTypeFromHandle { get; }
             public MethodReference FieldStoreGetInstance { get; }
@@ -3026,9 +3247,32 @@ namespace Nimrita.InstaReload.Editor
             return $"{field.Name}:{GetTypeName(field.FieldType)}:{(field.IsStatic ? "static" : "instance")}";
         }
 
+        /// <summary>
+        /// Declaring-type name for a lookup key, collapsed to the OPEN definition.
+        ///
+        /// Inside a generic type, Cecil spells the declaring type of a member as a
+        /// GenericInstanceType - "Container`1&lt;T&gt;" - while reflection reports the open definition,
+        /// "Container`1". Left alone the two keys never match, the member looks missing, and any
+        /// method touching a field on a generic type is refused. Same failure shape as the generic
+        /// FIELD TYPE mismatch fixed in b47b42e, one level up.
+        /// </summary>
+        private static string GetDeclaringTypeKeyName(TypeReference declaringType)
+        {
+            if (declaringType == null)
+            {
+                return string.Empty;
+            }
+
+            var canonical = declaringType is GenericInstanceType instance
+                ? instance.ElementType
+                : declaringType;
+
+            return NormalizeTypeName(canonical.FullName);
+        }
+
         private static string GetFieldLookupKey(FieldReference field)
         {
-            var typeName = NormalizeTypeName(field.DeclaringType.FullName);
+            var typeName = GetDeclaringTypeKeyName(field.DeclaringType);
             var fieldType = NormalizeTypeName(GetTypeName(field.FieldType));
             bool isStatic = false;
 
@@ -3082,7 +3326,7 @@ namespace Nimrita.InstaReload.Editor
 
         private static string GetMethodKey(MethodReference method)
         {
-            var typeName = NormalizeTypeName(method.DeclaringType.FullName);
+            var typeName = GetDeclaringTypeKeyName(method.DeclaringType);
             var paramTypes = method.Parameters.Select(p => NormalizeTypeName(GetTypeName(p.ParameterType)));
             var returnType = NormalizeTypeName(GetTypeName(method.ReturnType));
             var genericArity = method.HasGenericParameters ? method.GenericParameters.Count : 0;
@@ -3255,6 +3499,14 @@ namespace Nimrita.InstaReload.Editor
                 parameter.Position < context.GenericArguments.Length)
             {
                 return context.TargetModule.ImportReference(context.GenericArguments[parameter.Position]);
+            }
+
+            if (parameter.Type == GenericParameterType.Type &&
+                context.DeclaringTypeArguments != null &&
+                parameter.Position < context.DeclaringTypeArguments.Length)
+            {
+                return context.TargetModule.ImportReference(
+                    context.DeclaringTypeArguments[parameter.Position]);
             }
 
             IGenericParameterProvider owner = parameter.Type == GenericParameterType.Method

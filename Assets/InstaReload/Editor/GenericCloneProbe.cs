@@ -85,6 +85,32 @@ namespace Nimrita.InstaReload.Editor
                 $"   long (value)          = {Invoke(target, typeof(long), 5L)}");
         }
 
+        [MenuItem("Tools/InstaReload Clone Probe/4 - Report generic CLASS")]
+        public static void ReportGenericClass()
+        {
+            Debug.Log(
+                "[CProbe] GENERIC CLASS (GenericContainer<T>.Describe)\n" +
+                $"   <string>     (ref, call site)     = {InvokeContainer(typeof(string), "x")}\n" +
+                $"   <GameObject> (ref, NO call site)  = {InvokeContainer(typeof(GameObject), null)}\n" +
+                $"   <int>        (value, call site)   = {InvokeContainer(typeof(int), 7)}\n" +
+                $"   <float>      (value, NO site)     = {InvokeContainer(typeof(float), 1.5f)}\n" +
+                $"   <decimal>    (value, NO site)     = {InvokeContainer(typeof(decimal), 2.5m)}");
+        }
+
+        private static string InvokeContainer(Type argument, object value)
+        {
+            try
+            {
+                var constructed = typeof(GenericContainer<>).MakeGenericType(argument);
+                var instance = Activator.CreateInstance(constructed);
+                return (string)constructed.GetMethod("Describe").Invoke(instance, new[] { value });
+            }
+            catch (Exception ex)
+            {
+                return $"THREW {ex.GetType().Name}: {ex.InnerException?.GetType().Name ?? ""}";
+            }
+        }
+
         [MenuItem("Tools/InstaReload Clone Probe/3 - Dispose")]
         public static void Dispose()
         {
