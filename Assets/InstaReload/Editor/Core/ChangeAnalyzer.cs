@@ -592,6 +592,69 @@ namespace Nimrita.InstaReload.Editor
         }
 
         /// <summary>
+        /// Recomputes every cached signature from the file currently on disk.
+        ///
+        /// WHY THIS IS NEEDED:
+        ///   Analyze() only runs for changes detected DURING play mode — OnEditorUpdate throws
+        ///   pending changes away otherwise. Any edit made outside play mode therefore leaves
+        ///   the cache holding a signature for source that no longer exists, and the next
+        ///   in-play edit is compared against that stale baseline.
+        ///
+        ///   Observed consequence: deleting a method outside play mode, restoring it, then
+        ///   deleting it again in play mode produced a hash matching the stale baseline. The
+        ///   change was classified MethodBodyOnly, took the fast path, and skipped the
+        ///   structural validation that reports removed methods — so the removal warning
+        ///   never fired.
+        ///
+        /// Called on play mode enter so the baseline always matches what is actually running.
+        /// </summary>
+        internal static void RefreshFromDisk()
+        {
+            lock (_lock)
+            {
+                if (_signatureCache.Count == 0)
+                {
+                    return;
+                }
+
+                var paths = new List<string>(_signatureCache.Keys);
+                var refreshed = 0;
+
+                foreach (var path in paths)
+                {
+                    if (!File.Exists(path))
+                    {
+                        _signatureCache.Remove(path);
+                        refreshed++;
+                        continue;
+                    }
+
+                    try
+                    {
+                        var currentHash = ComputeSignatureHash(File.ReadAllText(path));
+                        if (_signatureCache[path] != currentHash)
+                        {
+                            _signatureCache[path] = currentHash;
+                            refreshed++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        InstaReloadLogger.LogWarning(
+                            $"[ChangeAnalyzer] Could not refresh {Path.GetFileName(path)}: {ex.Message}");
+                    }
+                }
+
+                if (refreshed > 0)
+                {
+                    SaveCache();
+                    InstaReloadLogger.Log(
+                        $"[ChangeAnalyzer] Refreshed {refreshed} signature(s) that changed outside Play Mode");
+                }
+            }
+        }
+
+        /// <summary>
         /// Clears the signature cache (useful when reloading domain)
         /// </summary>
         public static void ClearCache()
