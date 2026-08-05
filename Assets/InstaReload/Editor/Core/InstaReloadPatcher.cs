@@ -3242,7 +3242,12 @@ namespace Nimrita.InstaReload.Editor
                     return Instruction.Create(source.OpCode, module.ImportReference(runtimeMethod));
                 }
 
-                if (!NeedsGenericSubstitution(context, methodReference))
+                // A generic instantiation of one of OUR types must be rebuilt against the runtime
+                // type even when there is no generic parameter to substitute - see
+                // DeclaringTypeHasRuntimeCounterpart. NEWOBJ ONLY, deliberately: see that method.
+                if (!NeedsGenericSubstitution(context, methodReference) &&
+                    !(source.OpCode == CecilOpCodes.Newobj &&
+                      DeclaringTypeHasRuntimeCounterpart(context, methodReference)))
                 {
                     return Instruction.Create(source.OpCode, module.ImportReference(methodReference));
                 }
@@ -3572,6 +3577,50 @@ namespace Nimrita.InstaReload.Editor
         /// reference produced IL the runtime could not use. Anything not needing substitution now
         /// takes the original import path, which was correct all along.
         /// </summary>
+        /// <summary>
+        /// True when a method's declaring type is a generic instantiation of a type that ALSO exists
+        /// in the runtime assembly - Boxed&lt;int&gt; where Boxed`1 is one of ours.
+        ///
+        /// Such a reference has to be REBUILT against the runtime type. Left alone,
+        /// ImportReference keeps it pointing at the assembly we just compiled, so
+        /// <c>new Boxed&lt;int&gt;()</c> inside a patched body constructs the HOT type - a different
+        /// Type object from the runtime one. It survives while it stays in a local, which is why
+        /// nothing crashed, but is/as/casts against the runtime type fail and assigning it to a
+        /// runtime-typed field does not behave. The same fall-through also let a REFUSED method stay
+        /// callable through its hot copy.
+        ///
+        /// Measured 2026-08-06 before the fix:
+        ///   FALLTHROUGH newobj ... Boxed`1&lt;System.Int32&gt;::.ctor() -> binds to scope 'InstaReloadSuite.dll'
+        ///
+        /// EXTERNAL generics are deliberately excluded. The same run showed
+        /// List`1&lt;System.Int32&gt;::.ctor() binding to 'netstandard', where only one copy of the
+        /// type exists, so the plain import is already correct and rebuilding it would be churn.
+        /// The rule is: retarget only types that can have a second, hot copy.
+        ///
+        /// APPLIED TO NEWOBJ ONLY, and that boundary is measured, not cautious by taste. Applying it
+        /// to call/callvirt as well regressed six generic-method call sites: they stopped reaching
+        /// the patched body and started reaching the ORIGINAL one, which is strictly worse than the
+        /// hot copy they reached before. A/B on 2026-08-06, identical protocol both runs:
+        ///   without  22/22, 1 LEAK (BothAxes, pre-existing)
+        ///   with, all opcodes  22/22, 6 NEW LEAKs "call site saw M0 but runtime returned M1"
+        ///   with, newobj only  22/22, 1 LEAK (BothAxes) - baseline restored, newobj fixed
+        /// newobj is also where the damage actually is: it MINTS an object of the wrong Type that
+        /// then escapes into the program. A call returning a stale value is a different problem,
+        /// tangled up with Mono's generic sharing, and does not belong in this fix.
+        /// </summary>
+        private static bool DeclaringTypeHasRuntimeCounterpart(
+            MethodRewriteContext context,
+            MethodReference method)
+        {
+            if (!(method.DeclaringType is GenericInstanceType instance))
+            {
+                return false;
+            }
+
+            var resolved = ResolveRuntimeType(instance.ElementType, context.RuntimeAssembly);
+            return resolved != null && resolved.Assembly == context.RuntimeAssembly;
+        }
+
         private static bool NeedsGenericSubstitution(MethodRewriteContext context, TypeReference type)
         {
             if (type == null)

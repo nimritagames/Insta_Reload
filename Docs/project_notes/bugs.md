@@ -136,3 +136,32 @@ Format: date / issue / cause / fix
     references, the same way GetDeclaringTypeKeyName already does on the generic path, and apply it
     to the newobj/ctor lookup too. A miss should arguably also WARN instead of silently falling
     through to the hot assembly - the silence is what let this live undetected.
+
+- Date: 2026-08-06 (FIXED, same day)
+  Fix: DeclaringTypeHasRuntimeCounterpart in InstaReloadPatcher. A newobj whose declaring type is a
+    generic instantiation of a type that also exists in the RUNTIME assembly is now rebuilt through
+    ImportMethodReferenceSubstituted, which retargets it via ImportTypeReference. External generics
+    are excluded on purpose - List`1<int> binds to 'netstandard' where only one copy exists.
+  PROVED THE CAUSE FIRST, with a temporary FALLTHROUGH log at the exact statement:
+    FALLTHROUGH newobj ... Boxed`1<System.Int32>::.ctor() -> binds to scope 'InstaReloadSuite.dll'
+    FALLTHROUGH newobj ... List`1<System.Int32>::.ctor()  -> binds to scope 'netstandard'
+    The first is our type binding to the hot assembly; the second is the control that defined the
+    boundary. The diagnostic was removed once the fix landed.
+  PROVED THE FIX: reconfigured the suite to construct the generic targets inside patched Evaluate -
+    the exact shape that had produced four HOT-OBJECT:InstaReloadSuite failures - and got 22/22
+    with no HOT-OBJECT.
+  SCOPE IS NEWOBJ ONLY, and that boundary was measured, not chosen for caution. Applying the same
+    retarget to call/callvirt REGRESSED six generic-method call sites: they stopped reaching the
+    patched body and started reaching the ORIGINAL one, which is worse than the hot copy they
+    reached before. A/B, identical protocol:
+      without fix           22/22, 1 LEAK (BothAxes, pre-existing)
+      all opcodes           22/22, 6 NEW LEAKs "call site saw M0 but runtime returned M1"
+      newobj only           22/22, 1 LEAK (BothAxes) - baseline restored, newobj fixed
+  NO REGRESSION, verified by A/B rather than assumed. Generation 2 in one session produces ten LEAK
+    lines (nine call sites lagging exactly one generation, plus BothAxes) - IDENTICAL with the fix
+    shelved, so that staleness is pre-existing and untouched.
+  STILL OPEN: (a) call/callvirt to a generic method in a patched body reaches the hot copy, not the
+    runtime method - invisible while both carry the same marker, and the reason the six-LEAK
+    experiment was so revealing; (b) the one-generation lag on the second reload of a session.
+    Both are call-site problems tangled up with Mono generic sharing. The suite's LEAK lines are now
+    the standing detector for both.
