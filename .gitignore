@@ -111,4 +111,8 @@ InitTestScene*.unity*
 .claude/
 CLAUDE.md
 AGENTS.md
-[Dd]ocs/project_notes/
+
+# docs/project_notes IS committed as of 2026-08-06. It holds the root-cause record for bugs that
+# took a full session each to find (generic field-key mismatch, the async StackOverflow crash,
+# three Cecil-vs-reflection key bugs). While ignored, a machine wipe or fresh clone lost all of it
+# and the commit messages were the only durable copy.
