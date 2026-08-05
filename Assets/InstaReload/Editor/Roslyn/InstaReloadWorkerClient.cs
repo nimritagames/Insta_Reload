@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEngine;
 
 namespace Nimrita.InstaReload.Editor.Roslyn
@@ -676,8 +677,13 @@ namespace Nimrita.InstaReload.Editor.Roslyn
             var defineSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             defineSet.Add("UNITY_EDITOR");
 
+            // NamedBuildTarget.FromBuildTargetGroup throws on Unknown, where the obsolete
+            // group-based overload simply returned "". Skip instead of throwing — a missing
+            // define list degrades the worker's compile, an exception kills it outright.
             var buildTargetGroup = EditorUserBuildSettings.selectedBuildTargetGroup;
-            var defineString = PlayerSettings.GetScriptingDefineSymbolsForGroup(buildTargetGroup);
+            var defineString = buildTargetGroup == BuildTargetGroup.Unknown
+                ? string.Empty
+                : PlayerSettings.GetScriptingDefineSymbols(NamedBuildTarget.FromBuildTargetGroup(buildTargetGroup));
             if (!string.IsNullOrEmpty(defineString))
             {
                 foreach (var define in defineString.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))

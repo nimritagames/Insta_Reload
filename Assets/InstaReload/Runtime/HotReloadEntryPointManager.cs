@@ -112,7 +112,10 @@ namespace Nimrita.InstaReload
                 return;
             }
 
-            var objects = UnityEngine.Object.FindObjectsOfType(type);
+            // Two-arg overload excludes inactive objects, matching FindObjectsOfType(Type).
+            // SortMode.None because proxy attachment is order-independent — see the note in
+            // HotCallbackDispatcher for why None rather than InstanceID.
+            var objects = UnityEngine.Object.FindObjectsByType(type, FindObjectsSortMode.None);
             for (int i = 0; i < objects.Length; i++)
             {
                 var component = objects[i] as Component;

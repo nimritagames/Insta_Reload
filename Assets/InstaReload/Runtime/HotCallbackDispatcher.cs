@@ -234,7 +234,15 @@ namespace Nimrita.InstaReload.Runtime
                 // that ran 3x per frame and was the single biggest perf bottleneck.
                 if (_instanceCacheDirty)
                 {
-                    _cachedBehaviours = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>(includeInactive: false);
+                    // SortMode.None, not InstanceID: Unity is retiring InstanceID in favour of
+                    // EntityId, and the sortMode parameter goes with it ("previous sort order
+                    // cannot be maintained"). None matches what the future no-argument overload
+                    // does, so that migration is deleting an argument. Callback order across
+                    // objects was never a contract — InstanceID order is load order, which no
+                    // caller can predict anyway.
+                    _cachedBehaviours = UnityEngine.Object.FindObjectsByType<MonoBehaviour>(
+                        FindObjectsInactive.Exclude,
+                        FindObjectsSortMode.None);
                     _instanceCacheDirty = false;
                 }
 
