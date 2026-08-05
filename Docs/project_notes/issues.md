@@ -131,6 +131,19 @@ Format: date / task / status
     (RefreshFromDisk), Assets/InstaReload/Editor/Core/UnityCompilationSuppressor.cs (call it),
     Assets/InstaReload/Runtime/TestInstaReload.cs + TestInstaReloadCaller.cs (4-case fixture)
 
+- Date: 2026-08-06
+  Task: Fix the regression suite's validity flaw (44eaad2) before any further generic work
+  Status: Done - verified in Play Mode, clean session, two hot-reload generations
+  Notes: Graded observation now goes through reflection on the runtime type, so a PASS means the
+    METHOD was patched rather than the call site producing a value some other way. Direct call kept
+    as a cross-check; a disagreement prints a LEAK line. Also added NoInlining to every case and
+    made every case read instance state, as 44eaad2 asked - necessary but not sufficient by itself.
+    Baseline 22/22, M0->M1 22/22, M1->M2 22/22, no LEAK in any clean run.
+    The commit's inlining diagnosis did NOT hold up: inlining an unpatched method yields the OLD
+    marker, so it cannot fake a patch. The one reproduction was in a contaminated multi-generation
+    session and was off by exactly one generation. See decisions.md - undiagnosed, now visible.
+  Files: Assets/InstaReload/Tests/InstaReloadSuite.cs
+
 ## Improvement Backlog
 
 - LATENCY WORK IS DONE (2026-08-05). 7365ms -> ~59ms, 125x. Noise floor reached: identical work

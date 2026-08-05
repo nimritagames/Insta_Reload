@@ -462,3 +462,38 @@ Format: date / decision / context / outcome
     recorded it; a lowercase path silently matches nothing on Windows.
   HOW TO WORK WITH IT: record branch findings in the COMMIT MESSAGE, then update the notes from
     dev. Do not try to edit Docs/project_notes while on a feature branch.
+
+- Date: 2026-08-06
+  Decision: THE SUITE NOW GRADES THE RUNTIME METHOD, NOT THE CALL SITE. Every case is invoked by
+    name through reflection on the live object's type; the ordinary direct call is still made and
+    kept only as a cross-check. When the two disagree the suite prints a LEAK line naming the case.
+  Context: 44eaad2 recorded that the suite could not tell "this method was patched" from "this call
+    was inlined into a patched caller", and prescribed [MethodImpl(NoInlining)] plus an instance
+    field read. That fix is necessary but NOT sufficient on its own - it does not cover the second
+    way a call site can lie. InstaReloadPatcher.CloneInstruction remaps each method token to the
+    runtime method and, ON A LOOKUP MISS, keeps the reference pointing at the freshly compiled hot
+    assembly. A patched caller can therefore call a hot copy of a method the patcher explicitly
+    REFUSED, and the refused method reports as patched. Reflection resolves from the live type at
+    call time, so it is immune to both inlining and token fall-through.
+    All three defences are in place now: NoInlining on every case, every case reads instance state
+    before returning the marker, and the graded observation goes through reflection.
+  MEASURED (Unity 6000.3.10f1, Play Mode, clean single-generation session):
+    * baseline, nothing patched              = 22/22 PASS, no LEAK   <- the control
+    * flip M0 -> M1, patched 37/dispatched 2 = 22/22 PASS, marker=M1, no LEAK
+    * flip M1 -> M2, second generation       = 22/22 PASS, marker=M2, no LEAK
+    Both directions are exercised: if reflection could not see patches the 10 Patched cases would
+    fail; if it wrongly saw generics as patched the 12 Stale cases would fail. Neither happened.
+  THE COMMIT'S STATED CAUSE WAS NOT CONFIRMED, and the mechanism is still open. Inlining cannot
+    manufacture a fake PASS in the first place: an inlined copy of an UNPATCHED method carries the
+    OLD marker, so inlining produces false STALEs, not false patches. What did reproduce - once, in
+    a CONTAMINATED session (several hot-reload generations stacked up, plus a structural edit whose
+    Awake failed to patch) - was six generic cases where the direct call site returned M1 while the
+    runtime method returned M0: off by exactly one hot-reload generation. That points at
+    cross-generation staleness (an older hot assembly's copy still being reached), NOT at inlining.
+    It did NOT reproduce in a clean session across two generations. NOT DIAGNOSED. It no longer
+    matters for trust, because a divergence of that kind now prints a LEAK line instead of passing
+    silently, but it is a real product lead worth pulling.
+  ONE-CYCLE SETTLE, documented in the suite header so nobody chases it: "coroutine ongoing" can
+    report the previous marker on the FIRST grade after a patch, because the already-running
+    iterator resumes every 0.25s and may not have re-entered its body yet. Observed once, passed on
+    the next line. The observation is correct; only the timing is imprecise.
