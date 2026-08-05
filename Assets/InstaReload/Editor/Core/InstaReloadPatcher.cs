@@ -1494,6 +1494,21 @@ namespace Nimrita.InstaReload.Editor
             // Deliberately keyed on IAsyncStateMachine, NOT on the MoveNext name: ITERATOR state
             // machines also have MoveNext and they clone correctly (coroutines, including
             // already-running ones, are verified working). Only the async ones are broken.
+            // The OUTER async method must be refused too, not just the state machine's own methods.
+            // Our slow path uses Release emit, which emits an async state machine as a STRUCT while
+            // Unity's runtime build has it as a CLASS - logged as "base class changed
+            // (System.Object -> System.ValueType)" plus a phantom "removed" .ctor. Patching the
+            // outer method leaves its IL manipulating a type that disagrees with the runtime one,
+            // which ends in a StackOverflowException that kills the Editor.
+            if (HasAsyncStateMachineAttribute(method))
+            {
+                reason =
+                    $"async method ({method.DeclaringType.Name}.{method.Name}) cannot be patched yet - " +
+                    "its state machine is emitted differently by our compile than by Unity's, so it " +
+                    "keeps its previous body until you exit Play Mode";
+                return false;
+            }
+
             if (IsAsyncStateMachine(method.DeclaringType))
             {
                 reason =
@@ -1525,6 +1540,31 @@ namespace Nimrita.InstaReload.Editor
         /// async/await). Iterator state machines implement IEnumerator instead and are NOT matched,
         /// because those clone correctly.
         /// </summary>
+        /// <summary>
+        /// True for a method the compiler rewrote into an async state machine. Detected via
+        /// AsyncStateMachineAttribute, which the compiler puts on the OUTER method.
+        /// </summary>
+        private static bool HasAsyncStateMachineAttribute(MethodDefinition method)
+        {
+            if (method == null || !method.HasCustomAttributes)
+            {
+                return false;
+            }
+
+            foreach (var attribute in method.CustomAttributes)
+            {
+                if (string.Equals(
+                        attribute.AttributeType.FullName,
+                        "System.Runtime.CompilerServices.AsyncStateMachineAttribute",
+                        StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static bool IsAsyncStateMachine(TypeDefinition type)
         {
             if (type == null || !type.HasInterfaces)
@@ -2156,7 +2196,13 @@ namespace Nimrita.InstaReload.Editor
                 methodIds,
                 dispatchKeys,
                 dispatcherInvokeMethod,
-                targetIncludesThis: false);
+                // DERIVED, not assumed. MonoMod sometimes hands back a STATIC clone with `this` as
+                // an explicit first parameter and sometimes an instance one. Hardcoding false
+                // shifted EVERY parameter reference by one in the static case, so a method reading
+                // its 4th argument actually read its 3rd - silently, with no crash and no warning.
+                // Methods that merely null-checked a parameter looked correct, which is how it went
+                // unnoticed. Comparing counts self-corrects for both shapes.
+                targetIncludesThis: context.Method.Parameters.Count > updatedMethod.Parameters.Count);
 
             CloneMethodBody(context.Method, updatedMethod, rewriteContext);
         }

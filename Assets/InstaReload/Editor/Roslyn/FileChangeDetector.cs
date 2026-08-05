@@ -1138,11 +1138,38 @@ namespace Nimrita.InstaReload.Editor.Roslyn
         {
             try
             {
+                // A replay that never finished means it took the Editor down. Replaying the same
+                // patches again repeats the crash on every Play Mode entry, so quarantine instead -
+                // otherwise the user loses unsaved work repeatedly with no indication why.
+                if (PatchHistoryStore.WasPreviousReplayIncomplete())
+                {
+                    PatchHistoryStore.QuarantineAll("the previous replay did not complete (the Editor crashed)");
+                    return;
+                }
+
                 var records = PatchHistoryStore.LoadRecords();
                 if (records.Count == 0)
                 {
                     return;
                 }
+
+                // Only patches that survived to a clean Play Mode exit are replayable. One that
+                // crashed the session it was made in stays unverified and is skipped.
+                var unverified = records.Count(r => !r.verified);
+                if (unverified > 0)
+                {
+                    records = records.Where(r => r.verified).ToList();
+                    InstaReloadLogger.LogWarning(
+                        $"[FileDetector] Skipping {unverified} unverified cached patch(es) - they were " +
+                        "never proven survivable. Re-save the file to patch again.");
+                }
+
+                if (records.Count == 0)
+                {
+                    return;
+                }
+
+                PatchHistoryStore.BeginReplayAttempt();
 
                 InstaReloadLogger.LogVerbose($"[FileDetector] Replaying {records.Count} cached patch(es)");
 
@@ -1191,12 +1218,20 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                 }
 
                 replayStopwatch.Stop();
+
+                // Reaching here proves replay did not take the Editor down. Left in place, the
+                // sentinel tells the NEXT entry that replay crashed.
+                PatchHistoryStore.EndReplayAttempt();
+
                 InstaReloadLogger.LogVerbose(
                     InstaReloadLogCategory.FileDetector,
                     $"[Timing] Patch replay ({records.Count} record(s)) took {replayStopwatch.Elapsed.TotalMilliseconds:F0}ms — added to Play mode entry");
             }
             catch (Exception ex)
             {
+                // A managed exception is survivable, so this was not a crash - clear the sentinel
+                // rather than quarantining over a recoverable failure.
+                PatchHistoryStore.EndReplayAttempt();
                 InstaReloadLogger.LogWarning($"[FileDetector] Patch replay failed: {ex.Message}");
             }
         }
