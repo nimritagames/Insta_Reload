@@ -2647,6 +2647,7 @@ namespace Nimrita.InstaReload.Editor
             rewriteContext.TargetMethod = context.Method;
             rewriteContext.GenericArguments = genericArguments;
             rewriteContext.DeclaringTypeArguments = declaringTypeArguments;
+            rewriteContext.SourceMethod = updatedMethod;
 
             CloneMethodBody(context.Method, updatedMethod, rewriteContext);
         }
@@ -2722,6 +2723,10 @@ namespace Nimrita.InstaReload.Editor
             /// <summary>Actual type arguments of the constructed DECLARING type, or null. Resolves a
             /// type-level parameter to the real type (Int32 for Container-of-int).</summary>
             public Type[] DeclaringTypeArguments { get; set; }
+
+            /// <summary>The method being cloned FROM. Needed to tell whether a generic parameter
+            /// belongs to us or to some unrelated generic type in the signature.</summary>
+            public MethodDefinition SourceMethod { get; set; }
             public MethodReference DispatcherInvoke { get; }
             public MethodReference TypeGetTypeFromHandle { get; }
             public MethodReference FieldStoreGetInstance { get; }
@@ -3177,7 +3182,9 @@ namespace Nimrita.InstaReload.Editor
                     return Instruction.Create(source.OpCode, module.ImportReference(runtimeMethod));
                 }
 
-                return Instruction.Create(source.OpCode, module.ImportReference(methodReference));
+                return Instruction.Create(
+                    source.OpCode,
+                    ImportMethodReferenceSubstituted(context, methodReference));
             }
 
             if (operand is FieldReference fieldReference)
@@ -3191,7 +3198,9 @@ namespace Nimrita.InstaReload.Editor
                     }
                 }
 
-                return Instruction.Create(source.OpCode, module.ImportReference(fieldReference));
+                return Instruction.Create(
+                    source.OpCode,
+                    ImportFieldReferenceSubstituted(context, fieldReference));
             }
 
             if (operand is TypeReference typeReference)
@@ -3483,15 +3492,127 @@ namespace Nimrita.InstaReload.Editor
         }
 
         /// <summary>
+        /// Imports a METHOD reference with generic parameters substituted, instead of raw.
+        ///
+        /// `new List&lt;T&gt;()` emits `newobj List&lt;T&gt;::.ctor()` - a reference whose declaring type
+        /// carries the declaring type's own T. Importing that raw makes Cecil resolve T with no
+        /// context and throw NullReferenceException, which is why any method in a generic class
+        /// that built a collection over T could not be patched. `new List&lt;int&gt;()` survived only
+        /// because it contains no T.
+        ///
+        /// ImportTypeReference already substitutes; this routes every part of the signature
+        /// through it - declaring type, return type, parameter types, and the arguments of a
+        /// generic method instantiation.
+        /// </summary>
+        private static MethodReference ImportMethodReferenceSubstituted(
+            MethodRewriteContext context,
+            MethodReference source)
+        {
+            if (source is GenericInstanceMethod genericInstance)
+            {
+                var importedElement = ImportMethodReferenceSubstituted(context, genericInstance.ElementMethod);
+                var rebuiltInstance = new GenericInstanceMethod(importedElement);
+                foreach (var argument in genericInstance.GenericArguments)
+                {
+                    rebuiltInstance.GenericArguments.Add(ImportTypeReference(context, argument));
+                }
+
+                return rebuiltInstance;
+            }
+
+            var rebuilt = new MethodReference(
+                source.Name,
+                ImportTypeReference(context, source.ReturnType),
+                ImportTypeReference(context, source.DeclaringType))
+            {
+                HasThis = source.HasThis,
+                ExplicitThis = source.ExplicitThis,
+                CallingConvention = source.CallingConvention
+            };
+
+            // A generic method definition needs its own parameters in place before parameter types
+            // can refer to them.
+            foreach (var genericParameter in source.GenericParameters)
+            {
+                rebuilt.GenericParameters.Add(new GenericParameter(genericParameter.Name, rebuilt));
+            }
+
+            foreach (var parameter in source.Parameters)
+            {
+                rebuilt.Parameters.Add(
+                    new ParameterDefinition(ImportTypeReference(context, parameter.ParameterType)));
+            }
+
+            return context.TargetModule.ImportReference(rebuilt);
+        }
+
+        /// <summary>
+        /// Imports a FIELD reference with generic parameters substituted. Same hole as the method
+        /// path: a field on List&lt;T&gt; or on the generic declaring type itself carries an
+        /// unsubstituted T.
+        /// </summary>
+        private static FieldReference ImportFieldReferenceSubstituted(
+            MethodRewriteContext context,
+            FieldReference source)
+        {
+            var rebuilt = new FieldReference(
+                source.Name,
+                ImportTypeReference(context, source.FieldType),
+                ImportTypeReference(context, source.DeclaringType));
+
+            return context.TargetModule.ImportReference(rebuilt);
+        }
+
+        /// <summary>
         /// Maps a source generic parameter onto the target method being written into.
         ///
         /// Position-based, matching how the CLR identifies generic parameters. Method parameters map
         /// onto the target method's own list; type parameters onto its declaring type's.
         /// </summary>
+        /// <summary>
+        /// True when a generic parameter belongs to the method being cloned, or to its declaring
+        /// type - i.e. one WE are responsible for substituting. False for a parameter owned by any
+        /// other generic type mentioned in a signature.
+        /// </summary>
+        private static bool OwnsGenericParameter(MethodRewriteContext context, GenericParameter parameter)
+        {
+            var source = context.SourceMethod;
+            if (source == null)
+            {
+                return false;
+            }
+
+            var ownerName = (parameter.Owner as MemberReference)?.FullName;
+            if (ownerName == null)
+            {
+                // Owner is a TypeReference rather than a member; compare declaring type names.
+                ownerName = (parameter.Owner as TypeReference)?.FullName;
+            }
+
+            if (parameter.Type == GenericParameterType.Method)
+            {
+                return ownerName == source.FullName;
+            }
+
+            var declaring = source.DeclaringType;
+            return declaring != null && ownerName == declaring.FullName;
+        }
+
         private static TypeReference SubstituteGenericParameter(
             MethodRewriteContext context,
             GenericParameter parameter)
         {
+            // A signature can mention generic parameters belonging to OTHER generic types -
+            // Dictionary<TKey,TValue>::set_Item names Dictionary's own parameters, not ours.
+            // Substituting those positionally against our arguments rewrote
+            // set_Item(String,Int32) into set_Item(Int32,Object) and produced invalid IL. Only
+            // parameters we own may be substituted; the rest are left for Cecil to resolve against
+            // the declaring instance.
+            if (!OwnsGenericParameter(context, parameter))
+            {
+                return parameter;
+            }
+
             // Preferred: the actual type argument of the instantiation being written. Int32 for the
             // <int> hook, object for the shared reference-type hook.
             if (parameter.Type == GenericParameterType.Method &&

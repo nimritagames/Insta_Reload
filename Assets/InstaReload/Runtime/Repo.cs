@@ -23,27 +23,27 @@ namespace Nimrita.InstaReload
         public string Plain()
         {
             _counter++;
-            return "GSHARED-TEST:plain:" + _counter;
+            return "OWNER-GUARD:plain:" + _counter;
         }
 
         public string WithOpenList()
         {
             var list = new List<T>();
             list.Add(default(T));
-            return "GSHARED-TEST:openlist:" + list.Count + ":" + typeof(T).Name;
+            return "OWNER-GUARD:openlist:" + list.Count + ":" + typeof(T).Name;
         }
 
         public string WithClosedList()
         {
             var list = new List<int> { 1, 2 };
-            return "GSHARED-TEST:closedlist:" + list.Count;
+            return "OWNER-GUARD:closedlist:" + list.Count;
         }
 
         public string WithDictionary()
         {
             var map = new Dictionary<string, T>();
             map["k"] = default(T);
-            return "GSHARED-TEST:dict:" + map.Count;
+            return "OWNER-GUARD:dict:" + map.Count;
         }
     }
 
