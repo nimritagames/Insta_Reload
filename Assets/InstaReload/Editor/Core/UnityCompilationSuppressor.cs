@@ -197,6 +197,14 @@ namespace Nimrita.InstaReload.Editor
                     // starts with an empty registry. New types from the previous session
                     // are no longer valid — the AppDomain will reload on the next enter.
                     HotTypeRegistry.Clear();
+
+                    // Edits made outside Play Mode never reach ChangeAnalyzer, so its cached
+                    // signatures can describe source that no longer exists. Re-baseline against
+                    // disk before the first in-play edit, otherwise a structural change can be
+                    // misread as body-only, take the fast path, and skip the validation that
+                    // reports removed methods.
+                    ChangeAnalyzer.RefreshFromDisk();
+
                     FileChangeDetector.ReplayCachedPatches();
                     InstaReloadSessionMetrics.Reset();
                 InstaReloadSessionMetrics.SetStatus(InstaReloadOperationStatus.Idle, "Waiting for changes");

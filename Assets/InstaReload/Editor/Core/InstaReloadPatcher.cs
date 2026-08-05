@@ -315,19 +315,37 @@ namespace Nimrita.InstaReload.Editor
             // accompany new or changed methods.
             public readonly IReadOnlyList<string> NewTypeFullNames;
 
-            // Factory: validation passed, here are the new types found (may be empty).
-            public static CompatibilityResult Compatible(IReadOnlyList<string> newTypes)
-                => new CompatibilityResult(true, string.Empty, newTypes ?? (IReadOnlyList<string>)Array.Empty<string>());
+            // Methods present in the runtime assembly but absent from the compiled source —
+            // the developer deleted or renamed them, or changed a signature (which reads as
+            // remove-old + add-new). NOT a blocker: a JIT'd method cannot be removed from
+            // memory anyway, so the runtime keeps its original body and existing call sites
+            // stay valid. Reported so the developer knows that code is now stale.
+            public readonly IReadOnlyList<string> RemovedMethodKeys;
+
+            // Factory: validation passed, here are the new types and removed methods found.
+            public static CompatibilityResult Compatible(
+                IReadOnlyList<string> newTypes,
+                IReadOnlyList<string> removedMethods)
+                => new CompatibilityResult(
+                    true,
+                    string.Empty,
+                    newTypes ?? (IReadOnlyList<string>)Array.Empty<string>(),
+                    removedMethods ?? (IReadOnlyList<string>)Array.Empty<string>());
 
             // Factory: a hard structural blocker was found; patching must be aborted.
             public static CompatibilityResult Incompatible(string reason)
-                => new CompatibilityResult(false, reason, Array.Empty<string>());
+                => new CompatibilityResult(false, reason, Array.Empty<string>(), Array.Empty<string>());
 
-            private CompatibilityResult(bool isCompatible, string reason, IReadOnlyList<string> newTypes)
+            private CompatibilityResult(
+                bool isCompatible,
+                string reason,
+                IReadOnlyList<string> newTypes,
+                IReadOnlyList<string> removedMethods)
             {
                 IsCompatible = isCompatible;
                 BlockingReason = reason;
                 NewTypeFullNames = newTypes;
+                RemovedMethodKeys = removedMethods;
             }
         }
 
@@ -472,6 +490,26 @@ namespace Nimrita.InstaReload.Editor
                         }
 
                         newTypeNamesForRegistry = compat.NewTypeFullNames;
+
+                        // Removed / renamed / re-signatured methods keep their original bodies
+                        // in memory. Nothing breaks, but callers that weren't patched in this
+                        // cycle now run stale code, so say so rather than letting it be silent.
+                        if (compat.RemovedMethodKeys.Count > 0)
+                        {
+                            InstaReloadLogger.LogWarning(
+                                InstaReloadLogCategory.Patcher,
+                                $"{compat.RemovedMethodKeys.Count} method(s) no longer in source — the running build keeps their OLD implementation until you exit Play Mode:");
+                            foreach (var removedKey in compat.RemovedMethodKeys.Take(3))
+                            {
+                                InstaReloadLogger.LogWarning(InstaReloadLogCategory.Patcher, $"  -> {removedKey}");
+                            }
+                            if (compat.RemovedMethodKeys.Count > 3)
+                            {
+                                InstaReloadLogger.LogWarning(
+                                    InstaReloadLogCategory.Patcher,
+                                    $"  ... and {compat.RemovedMethodKeys.Count - 3} more");
+                            }
+                        }
 
                         if (newTypeNamesForRegistry.Count > 0)
                         {
@@ -1191,6 +1229,7 @@ namespace Nimrita.InstaReload.Editor
             // This includes compiler-generated types (closures, async state machines)
             // that the C# compiler emits alongside new or changed methods.
             var newTypeNames = new List<string>();
+            var removedMethodKeys = new List<string>();
 
             foreach (var updatedType in updatedTypes)
             {
@@ -1208,14 +1247,15 @@ namespace Nimrita.InstaReload.Editor
                 if (!FieldSetsMatch(updatedType, runtimeType, out var fieldReason))
                     return CompatibilityResult.Incompatible(fieldReason);
 
-                // Removed methods ARE a hard blocker: existing call sites in the runtime
-                // assembly would call a method that no longer exists and crash. New methods
-                // are fine — they're dispatched dynamically via HotReloadDispatcher.
-                if (!MethodSetsMatch(updatedType, runtimeType, out var methodReason))
+                // Removed methods are tolerated and reported — see MethodSetsMatch for why they
+                // cannot crash. New methods are dispatched dynamically via HotReloadDispatcher.
+                if (!MethodSetsMatch(updatedType, runtimeType, out var methodReason, out var removedFromType))
                     return CompatibilityResult.Incompatible(methodReason);
+
+                removedMethodKeys.AddRange(removedFromType);
             }
 
-            return CompatibilityResult.Compatible(newTypeNames);
+            return CompatibilityResult.Compatible(newTypeNames, removedMethodKeys);
         }
 
         private static IEnumerable<TypeDefinition> GetAllTypes(ModuleDefinition module)
@@ -1291,7 +1331,11 @@ namespace Nimrita.InstaReload.Editor
             return true;
         }
 
-        private static bool MethodSetsMatch(TypeDefinition updatedType, Type runtimeType, out string reason)
+        private static bool MethodSetsMatch(
+            TypeDefinition updatedType,
+            Type runtimeType,
+            out string reason,
+            out List<string> removed)
         {
             var updatedMethods = new HashSet<string>(
                 updatedType.Methods.Select(GetMethodKey),
@@ -1312,13 +1356,21 @@ namespace Nimrita.InstaReload.Editor
                 runtimeMethods.Add(GetMethodKey(runtimeType.TypeInitializer));
             }
 
-            // Check for REMOVED methods (exists in runtime but NOT in updated) - NOT ALLOWED
-            var removedMethods = runtimeMethods.Except(updatedMethods).ToList();
-            if (removedMethods.Count > 0)
-            {
-                reason = $"Method(s) removed from {runtimeType.Name}: {removedMethods.First()}";
-                return false;
-            }
+            // REMOVED methods (exists in runtime but NOT in updated) — ALLOWED, reported.
+            //
+            // This used to be a hard blocker on the theory that existing call sites would jump
+            // into nothing. They can't: a JIT'd method is never removed from memory, and we
+            // simply don't patch a method that no longer exists in source. Its original body
+            // stays live, so unpatched callers keep working exactly as before.
+            //
+            // The real consequence is staleness, not a crash — code that still calls the
+            // removed method runs the OLD implementation until the next domain reload. That is
+            // strictly better than the previous behaviour, which threw away the entire edit.
+            //
+            // Signature changes land here too: Foo(int) -> Foo(string) reads as remove-old plus
+            // add-new. The old overload keeps its body for old callers; the new one is picked up
+            // by the existing new-method dispatcher path.
+            removed = runtimeMethods.Except(updatedMethods).ToList();
 
             // NEW methods (exists in updated but NOT in runtime) - ALLOWED!
             // We'll add these dynamically at runtime
