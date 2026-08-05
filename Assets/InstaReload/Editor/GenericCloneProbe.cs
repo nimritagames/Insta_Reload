@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using MonoMod.Cil;
 using MonoMod.RuntimeDetour;
@@ -104,6 +105,75 @@ namespace Nimrita.InstaReload.Editor
                 var constructed = typeof(GenericContainer<>).MakeGenericType(argument);
                 var instance = Activator.CreateInstance(constructed);
                 return (string)constructed.GetMethod("Describe").Invoke(instance, new[] { value });
+            }
+            catch (Exception ex)
+            {
+                return $"THREW {ex.GetType().Name}: {ex.InnerException?.GetType().Name ?? ""}";
+            }
+        }
+
+        [MenuItem("Tools/InstaReload Clone Probe/5 - Report generic COMBINATIONS")]
+        public static void ReportCombos()
+        {
+            var combos = new GenericCombos();
+
+            Debug.Log(
+                "[CProbe] 1) MULTIPLE TYPE PARAMETERS  TwoParams<T,U>\n" +
+                $"   <int,string>   (call site)  = {Invoke2(combos, typeof(int), typeof(string), 1, "x")}\n" +
+                $"   <string,float> (call site)  = {Invoke2(combos, typeof(string), typeof(float), "a", 2.5f)}\n" +
+                $"   <string,object>(both ref)   = {Invoke2(combos, typeof(string), typeof(object), "a", null)}\n" +
+                $"   <long,long>    (NO site)    = {Invoke2(combos, typeof(long), typeof(long), 1L, 2L)}");
+
+            Debug.Log(
+                "[CProbe] 2) VALUE-TYPE CONSTRAINT  StructOnly<T> where T : struct\n" +
+                $"   <int>   (call site) = {Invoke1(combos, "StructOnly", typeof(int), 7)}\n" +
+                $"   <float> (NO site)   = {Invoke1(combos, "StructOnly", typeof(float), 1.5f)}");
+
+            Debug.Log(
+                "[CProbe] 3) NESTED GENERIC ARGUMENT  Nested<T>\n" +
+                $"   <List<int>> (call site) = {Invoke1(combos, "Nested", typeof(List<int>), new List<int>())}\n" +
+                $"   <List<string>> (NO site, ref) = {Invoke1(combos, "Nested", typeof(List<string>), new List<string>())}");
+
+            Debug.Log(
+                "[CProbe] 4) GENERIC METHOD ON GENERIC TYPE  GenericHolder<T>.Both<U>\n" +
+                $"   <int>.Both<float>  (call site) = {InvokeBoth(typeof(int), typeof(float), 1, 2f)}\n" +
+                $"   <string>.Both<object> (ref/ref) = {InvokeBoth(typeof(string), typeof(object), "a", null)}");
+        }
+
+        private static string Invoke1(GenericCombos target, string name, Type argument, object value)
+        {
+            try
+            {
+                return (string)typeof(GenericCombos).GetMethod(name)
+                    .MakeGenericMethod(argument).Invoke(target, new[] { value });
+            }
+            catch (Exception ex)
+            {
+                return $"THREW {ex.GetType().Name}: {ex.InnerException?.GetType().Name ?? ""}";
+            }
+        }
+
+        private static string Invoke2(GenericCombos target, Type a, Type b, object va, object vb)
+        {
+            try
+            {
+                return (string)typeof(GenericCombos).GetMethod("TwoParams")
+                    .MakeGenericMethod(a, b).Invoke(target, new[] { va, vb });
+            }
+            catch (Exception ex)
+            {
+                return $"THREW {ex.GetType().Name}: {ex.InnerException?.GetType().Name ?? ""}";
+            }
+        }
+
+        private static string InvokeBoth(Type typeArg, Type methodArg, object first, object second)
+        {
+            try
+            {
+                var holder = typeof(GenericHolder<>).MakeGenericType(typeArg);
+                var instance = Activator.CreateInstance(holder);
+                return (string)holder.GetMethod("Both")
+                    .MakeGenericMethod(methodArg).Invoke(instance, new[] { first, second });
             }
             catch (Exception ex)
             {
