@@ -1277,6 +1277,13 @@ namespace Nimrita.InstaReload.Editor
                 if (!FieldSetsMatch(updatedType, runtimeType, out var fieldReason))
                     return CompatibilityResult.Incompatible(fieldReason);
 
+                // A loaded CLR type's base class and interface list are fixed — patching method
+                // bodies cannot change them. Such an edit is therefore a silent no-op, and left
+                // unreported it reads as success: the reload prints "patched N" while every
+                // interface-based lookup (GetComponents<IFoo>(), `is IFoo`) still skips the
+                // object. Warn rather than block, consistent with removed methods and fields.
+                WarnOnInheritanceChange(updatedType, runtimeType);
+
                 // Removed methods are tolerated and reported — see MethodSetsMatch for why they
                 // cannot crash. New methods are dispatched dynamically via HotReloadDispatcher.
                 if (!MethodSetsMatch(updatedType, runtimeType, out var methodReason, out var removedFromType))
@@ -1308,6 +1315,45 @@ namespace Nimrita.InstaReload.Editor
                 {
                     yield return child;
                 }
+            }
+        }
+
+        /// <summary>
+        /// Reports base-class and interface changes on an existing type. These cannot be applied —
+        /// the CLR fixes a type's hierarchy when it loads — so the edit takes no effect until the
+        /// next domain reload. Verified 2026-08-05: changing the base class and adding an interface
+        /// both left runtimeType.BaseType and `is IFoo` untouched while the reload reported success.
+        ///
+        /// Compares against runtimeType.GetInterfaces(), which includes inherited interfaces, so an
+        /// interface the type already gets from a base does not produce a false warning.
+        /// </summary>
+        private static void WarnOnInheritanceChange(TypeDefinition updatedType, Type runtimeType)
+        {
+            var updatedBase = updatedType.BaseType == null
+                ? null
+                : NormalizeTypeName(updatedType.BaseType.FullName);
+            var runtimeBase = runtimeType.BaseType == null
+                ? null
+                : NormalizeTypeName(runtimeType.BaseType.FullName);
+
+            if (!string.Equals(updatedBase, runtimeBase, StringComparison.Ordinal))
+            {
+                InstaReloadLogger.LogWarning(
+                    $"[Patcher] {runtimeType.Name}: base class changed ({runtimeBase ?? "none"} -> {updatedBase ?? "none"}) " +
+                    "- NOT applied, the running type keeps its original base until you exit Play Mode");
+            }
+
+            var runtimeInterfaces = new HashSet<string>(
+                runtimeType.GetInterfaces().Select(i => NormalizeTypeName(i.FullName)),
+                StringComparer.Ordinal);
+
+            foreach (var added in updatedType.Interfaces
+                .Select(i => NormalizeTypeName(i.InterfaceType.FullName))
+                .Where(name => !runtimeInterfaces.Contains(name)))
+            {
+                InstaReloadLogger.LogWarning(
+                    $"[Patcher] {runtimeType.Name}: interface {added} added but NOT applied - " +
+                    "`is`/`as` casts and GetComponents<T>() will keep skipping this object until you exit Play Mode");
             }
         }
 
