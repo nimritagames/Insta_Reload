@@ -196,6 +196,16 @@ Format: date / task / status
   Files: Tools/InstaReloadWorker/Program.cs, Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs,
     Assets/InstaReload/Tests/InstaReloadSuite.cs
 
+- Date: 2026-08-06
+  Task: Verify STRUCTURAL async edits (new awaits, new locals), not just a marker flip
+  Status: Done - measured in Play Mode via AsyncShapeProbe; async is safe for real work
+  Notes: Adding locals across awaits and adding awaits both patch cleanly, in both directions, with
+    no crash and no collateral damage to the suite. The only refusal is a new VALUE-type local whose
+    address gets taken (e.g. string-concatenating an int) - the pre-existing ldflda limit on newly
+    added fields, not an async problem, and it fails safe.
+    First run confounded the two: the int concat made a general limitation look async-specific.
+  Files: Assets/InstaReload/Tests/AsyncShapeProbe.cs (new, manual probe)
+
 ## Improvement Backlog
 
 - LATENCY WORK IS DONE (2026-08-05). 7365ms -> ~59ms, 125x. Noise floor reached: identical work

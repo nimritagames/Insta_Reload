@@ -599,3 +599,32 @@ Format: date / decision / context / outcome
     went. The Stale branch of the suite's Check() is deliberately KEPT despite having no users - it
     is what a future limitation gets graded with, and what makes "this silently started working" a
     detectable event.
+
+- Date: 2026-08-06
+  Decision: STRUCTURAL async edits tested directly, not left as an open question. Async is safe for
+    real work, with one pre-existing limit that is not async-specific.
+  WHY THIS NEEDED ITS OWN PROBE: the suite grades a marker flip, which only changes a CONSTANT
+    inside MoveNext. That says nothing about adding an await or a local, which change the state
+    machine's FIELD SET and STATE COUNT - a different and much riskier patch, and the exact area
+    that killed the Editor twice. New file Assets/InstaReload/Tests/AsyncShapeProbe.cs, own [ASYNC]
+    log prefix so the result reads cleanly next to the suite's once-per-second line.
+  MEASURED IN PLAY MODE, every edit made while running:
+    * +1 string local living across an await, +1 await   -> seen=v2s     patched, no crash
+    * +2 locals across awaits, +1 more await (3 total)   -> seen=v3sx    patched, no crash
+    * reverted all the way back to the baseline shape    -> seen=v1      patched, no crash
+      (so structural edits work in BOTH directions - removing awaits and locals too)
+    * +1 INT local, string-concatenated                  -> REFUSED, loudly:
+        "Missing field address access not supported: <stamp>5__1:System.Int32"
+    Throughout: Editor alive, completions counter kept climbing (so no corrupted state machine),
+    and the suite stayed 22/22 - no collateral damage.
+  THE ONE REFUSAL IS NOT ASYNC-SPECIFIC, and the first run of this probe confounded the two. A new
+    local becomes a new state machine field; `"x" + someInt` emits ldflda to reach Int32.ToString();
+    IsFieldRewriteSupported refuses address access to any field missing from the runtime map, and
+    every newly added field is missing by definition. Nothing in that path knows what async is. It
+    fails SAFE - the old body keeps running - which is the correct outcome for a real limitation.
+    LESSON, again: the first result looked like an async finding and was not. Isolate the variable
+    before naming a cause. Rerunning with a STRING local turned the refusal into a pass.
+  NOTE ON HOW THIS GOT TESTED: the probe, the edits and the log reads were all driven through
+    mcp-unity rather than handed to Amritanshu as a manual checklist. Anything reachable by "write
+    a script, run it, read the console, change it, read again" should be done directly - asking him
+    to do it was the wrong call and he said so.
