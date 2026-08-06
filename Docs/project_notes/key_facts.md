@@ -9,7 +9,7 @@
 
 ## Performance Targets
 - Fast path (method body change): ~30-50ms total
-- Slow path (structural change): ~750ms total
+- Slow path (structural change): ~270-410ms (was ~750ms; Debug emit on both paths, 2026-08-06)
 - Roslyn init (once at startup): ~150ms
 - Debounce delay: 300ms
 - Baseline Unity domain reload: 3-30 seconds

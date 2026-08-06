@@ -286,7 +286,15 @@ namespace InstaReloadWorker
                 var syntaxTree = CSharpSyntaxTree.ParseText(request.SourceCode ?? string.Empty, parseOptions, request.FileName);
                 parseTimer.Stop();
 
-                var optimization = request.IsFastPath ? OptimizationLevel.Debug : OptimizationLevel.Release;
+                // DEBUG ON BOTH PATHS. Release emit is what made async unpatchable: Roslyn emits an
+                // async state machine as a STRUCT under Release and as a CLASS under Debug, while
+                // Unity's own build is Debug. The slow path therefore produced a state machine that
+                // structurally disagreed with the runtime one - logged as "base class changed
+                // (System.Object -> System.ValueType)" plus a phantom removed .ctor - and patching
+                // the outer method ended in a StackOverflowException that killed the Editor.
+                // Matching Unity's own emit is also the honest default: we are patching INTO a Debug
+                // build, so compiling the replacement as Release was never comparing like with like.
+                var optimization = OptimizationLevel.Debug;
                 var compilationOptions = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, optimizationLevel: optimization);
                 var compilation = CSharpCompilation.Create(request.AssemblyName ?? "InstaReloadPatch", new[] { syntaxTree }, _context.References, compilationOptions);
 

@@ -74,10 +74,16 @@ namespace Nimrita.InstaReload.Tests
     /// expectation, and if it needs a value-type generic instantiation add a call site in CallSites
     /// so the harvester can see it.
     ///
-    /// GENERICS: fully supported as of 2026-08-06. Generic methods, generic classes, multiple type
-    /// parameters, `where T : struct`, nested generic arguments, AND a generic method on a generic
-    /// type (Boxed&lt;T&gt;.BothAxes&lt;U&gt;, both axes at once) all patch. Every generic case here
-    /// is declared Patched. `async` is the only remaining Stale case in the suite.
+    /// NOTHING IN THIS SUITE IS STALE ANY MORE (2026-08-06). Generics went first - generic methods,
+    /// generic classes, multiple type parameters, `where T : struct`, nested generic arguments, and
+    /// a generic method on a generic type (both axes at once). Async went last. Every case here is
+    /// declared Patched, so the Stale branch of Check() currently has no users. KEEP IT: it is what
+    /// a future documented limitation will be graded with, and it is what makes "this silently
+    /// started working" a detectable event rather than a pleasant surprise.
+    ///
+    /// ASYNC, bounded staleness worth knowing: a task ALREADY IN FLIGHT resumes into the new
+    /// MoveNext body, so it finishes under the new code from its next await onward. A task started
+    /// after the edit runs the new body throughout. Same deal as an already-running coroutine.
     ///
     /// NO LEAK LINE SHOULD EVER PRINT NOW. The token fall-through behind them was fixed on
     /// 2026-08-06 (NeedsRuntimeRetarget): generic newobj and generic call sites are rebuilt against
@@ -476,10 +482,11 @@ namespace Nimrita.InstaReload.Tests
                 combos.ConstructsOwnGeneric(),
                 Reflected(combos, "ConstructsOwnGeneric", null, null), Expect.Patched);
 
-            // ---- proven REFUSED today: these must stay stale ----
-            // async is refused because our Release emit makes the state machine a struct while
-            // Unity's build makes it a class (796b63e). A PASS here means the refusal still holds.
-            Check(t, "async (refused)", _asyncSeen, _asyncSeen, Expect.Stale);
+            // Async was the last thing here to stop being a documented limitation. It used to be
+            // refused because Release emit made the state machine a struct while Unity's build made
+            // it a class; the worker emits Debug on both paths now, so the shapes agree and
+            // MoveNext - where an async method's real body lives - patches like anything else.
+            Check(t, "async", _asyncSeen, _asyncSeen, Expect.Patched);
 
             Check(t, "generic method <double>",
                 GenericMethod(1.0d),

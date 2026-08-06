@@ -182,6 +182,20 @@ Format: date / task / status
   Files: Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs,
     Assets/InstaReload/Tests/InstaReloadSuite.cs
 
+- Date: 2026-08-06
+  Task: Async/await hot reload - the last documented limitation the suite could grade
+  Status: Done - verified in Play Mode, baseline + two generations 22/22, no crash, no errors
+  Notes: Root cause was one line in the worker - Release emit on the slow path made the async state
+    machine a STRUCT where Unity's Debug build makes it a CLASS. Debug on both paths now. Proved the
+    shape change with async still refused (zero risk): the "base class changed" line and the phantom
+    removed .ctor both vanished, and the .ctor came back as a real method.
+    The backlog's plan - patch only the OUTER method - is a NO-OP and was measured as one: the
+    compiler puts essentially all user code in MoveNext. MoveNext had to be allowed, and it works.
+    Side effect: slow path ~750ms -> ~270-410ms, which answers the separate "try Debug emit" item.
+    The suite now has ZERO Stale cases.
+  Files: Tools/InstaReloadWorker/Program.cs, Assets/InstaReload/Editor/Core/InstaReloadPatcher.cs,
+    Assets/InstaReload/Tests/InstaReloadSuite.cs
+
 ## Improvement Backlog
 
 - LATENCY WORK IS DONE (2026-08-05). 7365ms -> ~59ms, 125x. Noise floor reached: identical work

@@ -2091,28 +2091,37 @@ namespace Nimrita.InstaReload.Editor
             // Deliberately keyed on IAsyncStateMachine, NOT on the MoveNext name: ITERATOR state
             // machines also have MoveNext and they clone correctly (coroutines, including
             // already-running ones, are verified working). Only the async ones are broken.
-            // The OUTER async method must be refused too, not just the state machine's own methods.
-            // Our slow path uses Release emit, which emits an async state machine as a STRUCT while
-            // Unity's runtime build has it as a CLASS - logged as "base class changed
-            // (System.Object -> System.ValueType)" plus a phantom "removed" .ctor. Patching the
-            // outer method leaves its IL manipulating a type that disagrees with the runtime one,
-            // which ends in a StackOverflowException that kills the Editor.
-            if (HasAsyncStateMachineAttribute(method))
-            {
-                reason =
-                    $"async method ({method.DeclaringType.Name}.{method.Name}) cannot be patched yet - " +
-                    "its state machine is emitted differently by our compile than by Unity's, so it " +
-                    "keeps its previous body until you exit Play Mode";
-                return false;
-            }
-
-            if (IsAsyncStateMachine(method.DeclaringType))
-            {
-                reason =
-                    $"async state machine ({method.DeclaringType.Name}.{method.Name}) cannot be patched yet - " +
-                    "the async method keeps its previous body until you exit Play Mode";
-                return false;
-            }
+            //
+            // THE OUTER ASYNC METHOD IS NOW ALLOWED (2026-08-06). It used to be refused because our
+            // slow path emitted Release, which makes an async state machine a STRUCT while Unity's
+            // build makes it a CLASS - logged as "base class changed (System.Object ->
+            // System.ValueType)" plus a phantom removed .ctor - so patching the outer method left
+            // its IL manipulating a type that disagreed with the runtime one, ending in a
+            // StackOverflowException that killed the Editor. The worker now emits Debug on BOTH
+            // paths, so the shapes match: both of those log lines are gone, and the state machine's
+            // .ctor shows up as a real method instead of a phantom removal.
+            //
+            // Patching the OUTER method is enough. It is the method that CONSTRUCTS the state
+            // machine, so the next call builds one from the new body. The state machine's own
+            // methods stay refused below, which means a task already in flight keeps running the
+            // old body to completion - the same bounded staleness an already-running coroutine has.
+            // ASYNC IS PATCHED LIKE ANYTHING ELSE NOW (2026-08-06). Nothing is refused here.
+            //
+            // Both halves of the old refusal are gone because their cause is gone. The worker used
+            // to emit Release on the slow path, which makes an async state machine a STRUCT while
+            // Unity's build makes it a CLASS; patching against that mismatch is what produced the
+            // StackOverflowException that killed the Editor, and the invalid IL with a raw
+            // unremapped token. Emitting Debug on both paths - the same thing Unity does - removes
+            // the mismatch, and the token retargeting landed the same day removed the rest.
+            //
+            // Refusing only the OUTER method was tried first and is a NO-OP: the compiler moves
+            // essentially all user code into MoveNext, so the outer method is a stub that builds
+            // the machine and starts it. MoveNext is where an edit actually lives, so MoveNext is
+            // what has to be patchable. Measured: outer-only gave 22/22 with async still stale.
+            //
+            // SEMANTICS, same bounded staleness as an already-running coroutine: a task ALREADY IN
+            // FLIGHT resumes into the new MoveNext body, so it finishes under the new code from its
+            // next await onward. A task started after the edit runs the new body throughout.
 
             foreach (var instruction in method.Body.Instructions)
             {
@@ -2130,57 +2139,6 @@ namespace Nimrita.InstaReload.Editor
 
             reason = string.Empty;
             return true;
-        }
-
-        /// <summary>
-        /// True for a compiler-generated async state machine (the &lt;Method&gt;d__N type behind
-        /// async/await). Iterator state machines implement IEnumerator instead and are NOT matched,
-        /// because those clone correctly.
-        /// </summary>
-        /// <summary>
-        /// True for a method the compiler rewrote into an async state machine. Detected via
-        /// AsyncStateMachineAttribute, which the compiler puts on the OUTER method.
-        /// </summary>
-        private static bool HasAsyncStateMachineAttribute(MethodDefinition method)
-        {
-            if (method == null || !method.HasCustomAttributes)
-            {
-                return false;
-            }
-
-            foreach (var attribute in method.CustomAttributes)
-            {
-                if (string.Equals(
-                        attribute.AttributeType.FullName,
-                        "System.Runtime.CompilerServices.AsyncStateMachineAttribute",
-                        StringComparison.Ordinal))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static bool IsAsyncStateMachine(TypeDefinition type)
-        {
-            if (type == null || !type.HasInterfaces)
-            {
-                return false;
-            }
-
-            foreach (var implementation in type.Interfaces)
-            {
-                if (string.Equals(
-                        implementation.InterfaceType.FullName,
-                        "System.Runtime.CompilerServices.IAsyncStateMachine",
-                        StringComparison.Ordinal))
-                {
-                    return true;
-                }
-            }
-
-            return false;
         }
 
         private static bool IsFieldRewriteSupported(

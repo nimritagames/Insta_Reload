@@ -562,3 +562,40 @@ Format: date / decision / context / outcome
     method type args covered: System.Int32" - the full 2x2 cross product. Suite baseline 22/22,
     gen1 22/22, gen2 22/22, zero LEAK lines, no errors. Its expectation is flipped Stale -> Patched,
     so async is now the ONLY Stale case left in the suite.
+
+- Date: 2026-08-06
+  Decision: ASYNC/AWAIT HOT RELOADS. The suite now has ZERO Stale cases - everything a marker flip
+    can reach picks up an edit.
+  ROOT CAUSE was one line in the worker: `request.IsFastPath ? Debug : Release`. Roslyn emits an
+    async state machine as a STRUCT under Release and as a CLASS under Debug, and Unity's own build
+    is Debug. So the slow path built a state machine shaped differently from the running one, and
+    patching against that mismatch is what produced the StackOverflowException that killed the
+    Editor (plus the invalid IL with a raw unremapped token). The worker emits Debug on BOTH paths
+    now. Compiling as Release was never right in the first place - we patch INTO a Debug build, so
+    it was not comparing like with like.
+  PROVED BEFORE TOUCHING THE REFUSAL, with async still refused so the probe could not crash
+    anything. Same file, before and after, from Editor.log:
+      before: "<RunAsync>d__40: base class changed (System.Object -> System.ValueType) - NOT applied"
+              "1 method(s) no longer in source: -> <RunAsync>d__40::.ctor`0()"
+      after:  neither line; the .ctor appears as a REAL method instead of a phantom removal
+    A struct has no constructor and a class does, so the constructor reappearing IS the shape
+    changing. That was the whole hypothesis, measured without risk.
+  THE BACKLOG'S PLAN WAS WRONG, and measuring it cost nothing. "Patch the OUTER method so the next
+    call builds a new state machine" is a NO-OP: the compiler moves essentially all user code into
+    MoveNext, leaving the outer method a stub that constructs the machine and starts it. Tried it -
+    Editor survived, suite reported 22/22 with async still stale, i.e. nothing happened. MoveNext is
+    where an async body actually lives, so MoveNext is what has to be patchable. Refusing it and
+    allowing only the outer method is precisely backwards.
+  MEASURED with MoveNext allowed: async tracked the edit across two generations (M1 then M2), no
+    crash, no errors, no StackOverflow. Expectation flipped Stale -> Patched; baseline 22/22, gen1
+    22/22, gen2 22/22.
+  SEMANTICS: a task ALREADY IN FLIGHT resumes into the new MoveNext, so it finishes under the new
+    code from its next await onward; a task started after the edit runs the new body throughout.
+    Same bounded staleness an already-running coroutine has, and accepted on the same grounds.
+  SIDE EFFECT, and it closes a separate backlog item: the slow path fell from ~750ms to ~270-410ms,
+    because Debug emit skips the optimiser. Backlog item "evaluate Debug emit on the slow path" is
+    answered - do it, it is both faster and more correct.
+  ORPHANS REMOVED: HasAsyncStateMachineAttribute and IsAsyncStateMachine, unused once the refusals
+    went. The Stale branch of the suite's Check() is deliberately KEPT despite having no users - it
+    is what a future limitation gets graded with, and what makes "this silently started working" a
+    detectable event.
