@@ -1456,12 +1456,14 @@ namespace Nimrita.InstaReload.Editor
                     var resolvedArgs = new Type[arity];
                     var resolved = true;
                     var anyValueType = false;
+                    TypeReference unresolvedArgument = null;
                     for (int i = 0; i < arity; i++)
                     {
                         var argument = ResolveRuntimeType(candidate[i], runtimeAssembly);
                         if (argument == null)
                         {
                             resolved = false;
+                            unresolvedArgument = candidate[i];
                             break;
                         }
 
@@ -1469,8 +1471,27 @@ namespace Nimrita.InstaReload.Editor
                         anyValueType |= argument.IsValueType;
                     }
 
-                    // All-reference sets are already served by the shared hook.
-                    if (!resolved || !anyValueType)
+                    // These two were one condition, which hid a failure behind a by-design skip.
+                    if (!resolved)
+                    {
+                        // A type argument that would not resolve. This instantiation is dropped, so
+                        // it keeps its old body after a reload - and from the outside that is
+                        // indistinguishable from "this instantiation was not needed".
+                        if (!MentionsGenericParameter(unresolvedArgument))
+{
+    InstaReloadEvents.Record(
+                            phase: "patch",
+                            eventCode: InstaReloadEvents.Ev.LookupMiss,
+                            severity: InstaReloadEvents.SeverityWarn,
+                            target: methodName,
+                            reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                            detail: "declaring-type argument unresolved; instantiation not hooked");
+}
+                        continue;
+                    }
+
+                    // All-reference sets are genuinely served by the shared hook: by design, quiet.
+                    if (!anyValueType)
                     {
                         continue;
                     }
@@ -1619,12 +1640,14 @@ namespace Nimrita.InstaReload.Editor
                 var args = new Type[arity];
                 var resolved = true;
                 var anyValueType = false;
+                TypeReference unresolvedArgument = null;
                 for (int i = 0; i < arity; i++)
                 {
                     var argument = ResolveRuntimeType(candidate[i], runtimeAssembly);
                     if (argument == null)
                     {
                         resolved = false;
+                        unresolvedArgument = candidate[i];
                         break;
                     }
 
@@ -1632,8 +1655,23 @@ namespace Nimrita.InstaReload.Editor
                     anyValueType |= argument.IsValueType;
                 }
 
-                // All-reference sets are already served by the shared body above.
-                if (!resolved || !anyValueType)
+                if (!resolved)
+                {
+                    if (!MentionsGenericParameter(unresolvedArgument))
+{
+    InstaReloadEvents.Record(
+                        phase: "patch",
+                        eventCode: InstaReloadEvents.Ev.LookupMiss,
+                        severity: InstaReloadEvents.SeverityWarn,
+                        target: methodKey,
+                        reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                        detail: "method type argument unresolved; instantiation not hooked");
+}
+                    continue;
+                }
+
+                // All-reference sets are genuinely served by the shared body above: by design.
+                if (!anyValueType)
                 {
                     continue;
                 }
@@ -1754,12 +1792,14 @@ namespace Nimrita.InstaReload.Editor
                 var runtimeArgs = new Type[parameterCount];
                 var resolved = true;
                 var anyValueType = false;
+                TypeReference unresolvedArgument = null;
                 for (int i = 0; i < parameterCount; i++)
                 {
                     var argument = ResolveRuntimeType(argumentSet[i], runtimeAssembly);
                     if (argument == null)
                     {
                         resolved = false;
+                        unresolvedArgument = argumentSet[i];
                         break;
                     }
 
@@ -1767,8 +1807,23 @@ namespace Nimrita.InstaReload.Editor
                     anyValueType |= argument.IsValueType;
                 }
 
-                // All-reference sets are already served by the shared hook above.
-                if (!resolved || !anyValueType)
+                if (!resolved)
+                {
+                    if (!MentionsGenericParameter(unresolvedArgument))
+{
+    InstaReloadEvents.Record(
+                        phase: "patch",
+                        eventCode: InstaReloadEvents.Ev.LookupMiss,
+                        severity: InstaReloadEvents.SeverityWarn,
+                        target: methodKey,
+                        reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                        detail: "call-site type argument unresolved; instantiation not hooked");
+}
+                    continue;
+                }
+
+                // All-reference sets are genuinely served by the shared hook above: by design.
+                if (!anyValueType)
                 {
                     continue;
                 }
@@ -3689,6 +3744,53 @@ namespace Nimrita.InstaReload.Editor
                 return elementType != null ? elementType.MakeArrayType(arrayType.Rank) : null;
             }
 
+            // A CLOSED GENERIC is a composite too, and it was the one shape missing here.
+            // Cecil spells it "List`1<System.Int32>"; reflection's GetType wants
+            // "List`1[System.Int32]", so the name lookups below could never match and every closed
+            // generic resolved to null. Callers read that null as an answer, so value-type
+            // instantiations with a generic argument were silently never hooked - invisible only
+            // because reference-type instantiations are covered by the shared body anyway.
+            // Found 2026-08-06 by the event sink: 44 resolve.failed records in one reload, all
+            // List`1<Int32>, Dictionary`2<String,Int32>, Func`1<String>.
+            if (type is GenericInstanceType genericInstanceType)
+            {
+                var definition = ResolveRuntimeType(genericInstanceType.ElementType, runtimeAssembly);
+                if (definition == null)
+                {
+                    return null;
+                }
+
+                var arguments = new Type[genericInstanceType.GenericArguments.Count];
+                for (int i = 0; i < arguments.Length; i++)
+                {
+                    var argument = ResolveRuntimeType(genericInstanceType.GenericArguments[i], runtimeAssembly);
+                    if (argument == null)
+                    {
+                        return null;
+                    }
+
+                    arguments[i] = argument;
+                }
+
+                try
+                {
+                    return definition.MakeGenericType(arguments);
+                }
+                catch (Exception ex)
+                {
+                    // Constraint violation or arity mismatch. Returning null here is honest, but it
+                    // is a different null from "not found", so it says which.
+                    InstaReloadEvents.Record(
+                        phase: "patch",
+                        eventCode: InstaReloadEvents.Ev.ResolveFailed,
+                        severity: InstaReloadEvents.SeverityWarn,
+                        target: type.FullName,
+                        reason: InstaReloadEvents.Reason.ResolveThrew,
+                        detail: $"MakeGenericType failed ({ex.GetType().Name}: {ex.Message})");
+                    return null;
+                }
+            }
+
             var normalizedName = NormalizeTypeName(type.FullName);
 
             // 1. HotTypeRegistry — fastest path for developer-added types.
@@ -3720,6 +3822,20 @@ namespace Nimrita.InstaReload.Editor
                 if (resolved != null)
                     return resolved;
             }
+
+            // EVERY strategy exhausted. Thirteen call sites read this null as an answer, and what
+            // they do with it - skip an instantiation, decline a retarget, fall back to a hot
+            // reference - is indistinguishable from "resolved, and the answer was no". So the
+            // difference goes on record. Rare by construction: a type reachable from a compiled
+            // assembly is normally findable, and the expected-null cases (generic parameters)
+            // return earlier without coming through here.
+            InstaReloadEvents.Record(
+                phase: "patch",
+                eventCode: InstaReloadEvents.Ev.ResolveFailed,
+                severity: InstaReloadEvents.SeverityWarn,
+                target: normalizedName,
+                reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                detail: "type not found in hot registry, runtime assembly, system types, or any loaded assembly");
 
             return null;
         }
@@ -3809,6 +3925,56 @@ namespace Nimrita.InstaReload.Editor
         /// to the ORIGINAL body - strictly worse than the hot copy. The two shapes have to move
         /// together.
         /// </summary>
+        /// <summary>
+        /// True when a type argument mentions an open generic parameter. Such an instantiation can
+        /// never be hooked - there is no runtime Type for T - so skipping it is correct and must NOT
+        /// be reported as a failure. Added because the first version of the unresolved-argument
+        /// warning fired 36 times in one reload on Boxed`1&lt;T&gt;, which is exactly the
+        /// permanently-expected warning the directive forbids: it trains people to ignore the log.
+        /// </summary>
+        private static bool MentionsGenericParameter(TypeReference type)
+        {
+            if (type == null)
+            {
+                return true;
+            }
+
+            if (type is GenericParameter)
+            {
+                return true;
+            }
+
+            if (type is GenericInstanceType instance)
+            {
+                foreach (var argument in instance.GenericArguments)
+                {
+                    if (MentionsGenericParameter(argument))
+                    {
+                        return true;
+                    }
+                }
+
+                return MentionsGenericParameter(instance.ElementType);
+            }
+
+            if (type is ArrayType array)
+            {
+                return MentionsGenericParameter(array.ElementType);
+            }
+
+            if (type is ByReferenceType byRef)
+            {
+                return MentionsGenericParameter(byRef.ElementType);
+            }
+
+            if (type is PointerType pointer)
+            {
+                return MentionsGenericParameter(pointer.ElementType);
+            }
+
+            return false;
+        }
+
         private static bool NeedsRuntimeRetarget(MethodRewriteContext context, MethodReference method)
         {
             if (method.DeclaringType is GenericInstanceType instance)

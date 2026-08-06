@@ -193,3 +193,19 @@ Format: date / issue / cause / fix
     green, so it was not load-bearing and was dropped. The comment at BuildGenericHookTargets
     claiming one hook covers every reference instantiation still stands, now re-verified with an
     honest harness rather than the old one.
+
+- Date: 2026-08-06
+  Issue: ResolveRuntimeType could not resolve ANY closed generic type. Cecil spells one
+    "List`1<System.Int32>"; reflection's GetType wants "List`1[System.Int32]", so every name lookup
+    missed and the method returned null. Thirteen call sites read that null as an answer, so
+    value-type instantiations with a generic argument were never hooked.
+  Why it stayed invisible: reference-type instantiations are covered by the shared gshared body
+    anyway, so nothing observably broke. The gap was pure luck, not design.
+  Found by: the structured event sink, on its first run with resolve.failed instrumented - 44
+    records in a single reload, all List`1<Int32>, Dictionary`2<String,Int32>, Func`1<String>.
+    Nobody was looking for this. The instrument found it because it was told to speak.
+  Fix: handle GenericInstanceType as the composite it is - resolve the element type, resolve each
+    argument, MakeGenericType - exactly like the existing array/pointer/byref branches, which was
+    the shape this one was missing. MakeGenericType failure is recorded separately from "not found",
+    because a constraint violation is a different fact.
+  Verified: 22/22 across three generations; resolve.failed records went 44 -> 0.
