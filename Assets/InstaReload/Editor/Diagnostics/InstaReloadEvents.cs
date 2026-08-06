@@ -127,10 +127,27 @@ namespace Nimrita.InstaReload.Editor
             get { lock (Sync) { return _externalFallthroughs; } }
         }
 
+        /// <summary>
+        /// The most recently completed reload. Play Mode code grades CONTINUOUSLY while a reload is
+        /// a moment, so a harness verdict almost never lands inside a reload scope - it lands after
+        /// one. Attributing it to reload 0 was technically honest and practically useless: it broke
+        /// the very join the reload id exists to provide. A verdict is attributed to the reload it
+        /// is reporting ON.
+        /// </summary>
+        internal static int LastCompletedReload { get; private set; }
+
+        /// <summary>
+        /// Which reload a runtime observation belongs to: the one in progress if there is one,
+        /// otherwise the last one that finished.
+        /// </summary>
+        internal static int AttributionReload =>
+            CurrentReload != 0 ? CurrentReload : LastCompletedReload;
+
         /// <summary>Ends the current reload and writes its records. Always pair with BeginReload.</summary>
         internal static void EndReload()
         {
             Flush();
+            LastCompletedReload = CurrentReload;
             CurrentReload = 0;
         }
 

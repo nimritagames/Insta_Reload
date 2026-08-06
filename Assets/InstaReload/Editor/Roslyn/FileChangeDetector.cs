@@ -200,7 +200,37 @@ namespace Nimrita.InstaReload.Editor.Roslyn
 
         static FileChangeDetector()
         {
+            ConnectDiagnosticsSink();
             Initialize();
+        }
+
+        /// <summary>
+        /// Lets Play Mode code record into the same structured sink as the patcher, under the same
+        /// reload id, so a harness verdict and what the patcher actually did become one query
+        /// instead of two logs nobody can join. Connected before Initialize so nothing that runs
+        /// during startup reports into a null seam.
+        /// </summary>
+        private static void ConnectDiagnosticsSink()
+        {
+            HotReloadDiagnostics.Sink = (eventCode, severity, extraJson) =>
+                InstaReloadEvents.Record(
+                    // Attributed to the reload being reported ON, not the one in progress - Play
+                    // Mode grades continuously and a reload is a moment, so a verdict almost never
+                    // lands inside a scope. Using CurrentReload here filed every harness result
+                    // under reload 0, which broke the join it exists for.
+                    reload: InstaReloadEvents.AttributionReload,
+                    phase: "runtime",
+                    eventCode: eventCode,
+                    severity: severity,
+                    file: null,
+                    target: null,
+                    reason: null,
+                    detail: null,
+                    extraJson: extraJson);
+
+            // Written immediately: a runtime observation has no reload end to ride along with, so
+            // buffering it would mean it only appears when some LATER reload happens to flush.
+            HotReloadDiagnostics.SinkFlush = InstaReloadEvents.Flush;
         }
 
         internal static void EnsureInitialized()

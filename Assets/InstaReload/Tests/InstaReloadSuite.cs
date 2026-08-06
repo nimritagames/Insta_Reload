@@ -138,6 +138,9 @@ namespace Nimrita.InstaReload.Tests
         private string _freshSeen = "(pending)";
         private bool _ongoingExited;
 
+        /// <summary>Last verdict written to the structured sink. Only changes are worth recording.</summary>
+        private string _lastReportedSignature;
+
         /// <summary>
         /// Targets for the generic-class cases, constructed in Awake ON PURPOSE.
         /// Constructing them inside Evaluate produced HOT-ASSEMBLY instances - the newobj token for
@@ -380,6 +383,74 @@ namespace Nimrita.InstaReload.Tests
         }
 
         /// <summary>
+        /// Writes this suite's verdict into the patcher's structured sink, so harness and product
+        /// land in one file under one reload id.
+        ///
+        /// BY REFLECTION, NOT A DIRECT CALL, and the reason is load-bearing: this file must stay
+        /// SELF-CONTAINED. InstaReload compiles one file at a time, so naming a type from another
+        /// file makes the suite unable to hot reload ITSELF - which is its whole purpose. The first
+        /// attempt did exactly that and the worker rejected it immediately:
+        ///   InstaReloadSuite.cs(521,17): error CS0103: The name 'HotReloadDiagnostics' does not
+        ///   exist in the current context
+        /// Unity's full compile was perfectly happy; only the single-file hot compile was not.
+        ///
+        /// If the seam is absent - a player build, or the Editor never connected it - this is a
+        /// no-op, and that is not a silent loss: the verdict is already on the console. Only the
+        /// JOIN is missing, and there is no patcher to join against in that situation anyway.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ReportToSink(string severity, string extraJson)
+        {
+            try
+            {
+                if (_sinkReport == null)
+                {
+                    // NO LATCH. The first attempt can legitimately land before the Editor has
+                    // connected the seam, and a one-shot "resolved: failed" flag would then disable
+                    // reporting for the whole session - silently, which is the exact failure this
+                    // machinery exists to prevent. Re-resolving costs a Type.GetType per verdict,
+                    // and verdicts are only produced when something CHANGED.
+                    var seam = Type.GetType("Nimrita.InstaReload.HotReloadDiagnostics, Nimrita.InstaReload.Runtime")
+                               ?? Type.GetType("Nimrita.InstaReload.HotReloadDiagnostics");
+                    _sinkReport = seam?.GetMethod(
+                        "Report",
+                        BindingFlags.Public | BindingFlags.Static,
+                        null,
+                        new[] { typeof(string), typeof(string), typeof(string) },
+                        null);
+
+                    if (_sinkReport == null)
+                    {
+                        // Say so ONCE. Without this the suite looks like it is recording when it is
+                        // not, and a missing record reads as "nothing happened".
+                        if (!_sinkUnavailableReported)
+                        {
+                            _sinkUnavailableReported = true;
+                            Debug.LogWarning(
+                                $"[SUITE] structured sink unreachable (seam={(seam == null ? "type missing" : "Report missing")}); " +
+                                "verdicts stay on the console only");
+                        }
+
+                        return;
+                    }
+
+                    _sinkUnavailableReported = false;
+                }
+
+                _sinkReport.Invoke(null, new object[] { "suite.result", severity, extraJson });
+            }
+            catch (Exception ex)
+            {
+                // Never let reporting break grading - but never hide that it broke, either.
+                Debug.LogWarning($"[SUITE] could not reach the structured sink: {ex.GetType().Name}");
+                _sinkReport = null;
+            }
+        }
+
+        private static MethodInfo _sinkReport;
+        private static bool _sinkUnavailableReported;
+
+        /// <summary>
         /// Same resolution rules as <see cref="Reflected"/>, for the cases whose result is observed
         /// through a field they write rather than through a return value.
         /// </summary>
@@ -502,6 +573,25 @@ namespace Nimrita.InstaReload.Tests
             Debug.Log(
                 $"[SUITE] {t.Passed}/{t.Total} {verdict} | marker={Marker}{guard} (frame {Time.frameCount})" +
                 (t.Notes.Length > 0 ? "\n" + t.Notes : string.Empty));
+
+            // Also record into the patcher's structured sink, so "what the harness saw" and "what
+            // the patcher did" land in one file under one reload id. That contradiction - the suite
+            // scoring BothAxes a pass while the patcher logged "NO instantiation patched" - is the
+            // reason this seam exists.
+            //
+            // ONLY ON CHANGE. Grading runs once per second; recording every tick would be 3600
+            // identical lines an hour, which is the console-flooding failure that has already cost
+            // this project a wrong conclusion. A verdict that has not moved is not news.
+            var signature = $"{t.Passed}/{t.Total}|{Marker}|{t.Notes}";
+            if (signature != _lastReportedSignature)
+            {
+                _lastReportedSignature = signature;
+                ReportToSink(
+                    verdict == "PASS" ? "info" : "warn",
+                    $"\"passed\":{t.Passed},\"total\":{t.Total},\"verdict\":\"{verdict}\"," +
+                    $"\"marker\":\"{Marker}\",\"frame\":{Time.frameCount}," +
+                    $"\"guardTripped\":{(_ongoingExited ? "true" : "false")}");
+            }
         }
 
         private sealed class Tally
