@@ -3395,6 +3395,25 @@ namespace Nimrita.InstaReload.Editor
                 if (!NeedsGenericSubstitution(context, fieldReference.DeclaringType) &&
                     !NeedsGenericSubstitution(context, fieldReference.FieldType))
                 {
+                    // Same fall-through as the method path above, same rule. A field on a type that
+                    // can only have one copy is fine to leave alone; a field on one of OUR types
+                    // that reached here means the runtime field map missed it, and the reference
+                    // stays bound to the assembly we just compiled.
+                    if (IsRuntimeAssemblyType(context, fieldReference.DeclaringType))
+                    {
+                        InstaReloadEvents.Record(
+                            phase: "patch",
+                            eventCode: InstaReloadEvents.Ev.TokenFallthrough,
+                            severity: InstaReloadEvents.SeverityWarn,
+                            target: fieldReference.FullName,
+                            reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                            extraJson: $"\"opcode\":\"{source.OpCode.Name}\",\"kind\":\"field\",\"ours\":true");
+                    }
+                    else
+                    {
+                        InstaReloadEvents.CountExternalFallthrough();
+                    }
+
                     return Instruction.Create(source.OpCode, module.ImportReference(fieldReference));
                 }
 
