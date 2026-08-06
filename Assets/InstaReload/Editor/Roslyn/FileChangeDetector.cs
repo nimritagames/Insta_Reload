@@ -914,6 +914,24 @@ namespace Nimrita.InstaReload.Editor.Roslyn
                     InstaReloadLogCategory.FileDetector,
                     $"[Timing]   → patch: {patchPhases.BuildLine()}");
             }
+
+            // One summary record per reload, then close the scope and write. Everything this reload
+            // decided is on disk before anyone can read the console line and go looking.
+            InstaReloadEvents.Record(
+                phase: "reload",
+                eventCode: InstaReloadEvents.Ev.ReloadSummary,
+                severity: InstaReloadEvents.SeverityInfo,
+                file: sample.FileName,
+                extraJson:
+                    $"\"gen\":{timeline.Generation}," +
+                    $"\"fastPath\":{(sample.IsFastPath ? "true" : "false")}," +
+                    $"\"totalMs\":{sample.TotalMs:F0}," +
+                    $"\"patched\":{(result != null ? result.PatchedCount : 0)}," +
+                    $"\"dispatched\":{(result != null ? result.DispatchedCount : 0)}," +
+                    $"\"skippedGeneric\":{(result != null ? result.SkippedGenericMethods.Count : 0)}," +
+                    $"\"externalFallthroughs\":{InstaReloadEvents.ExternalFallthroughCount}");
+
+            InstaReloadEvents.EndReload();
         }
 
         private static void RequeueFile(string filePath)

@@ -2294,9 +2294,17 @@ namespace Nimrita.InstaReload.Editor
                 var runtimeToken = runtimeMethod.MetadataToken;
                 tokenPairs[patchToken] = new MethodTokenPair(patchToken, runtimeToken, methodKey);
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore token tracking failures.
+                // Losing a token pair is not fatal, but it means later diagnostics for this method
+                // are blind - so the blindness itself has to be visible.
+                InstaReloadEvents.Record(
+                    phase: "patch",
+                    eventCode: InstaReloadEvents.Ev.ResolveFailed,
+                    severity: InstaReloadEvents.SeverityWarn,
+                    target: methodKey,
+                    reason: InstaReloadEvents.Reason.ResolveThrew,
+                    detail: $"token pair not tracked ({ex.GetType().Name}: {ex.Message})");
             }
         }
 
@@ -2468,8 +2476,20 @@ namespace Nimrita.InstaReload.Editor
                 {
                     current = baseType.Resolve();
                 }
-                catch
+                catch (Exception ex)
                 {
+                    // "Could not determine" is being returned as "determined: no". That silently
+                    // downgrades an entry point to the fallback proxy path, or to missing entirely.
+                    // The answer stays false - walking an unresolvable chain is not safe - but the
+                    // fact that it was a guess rather than a finding is now on record.
+                    InstaReloadEvents.Record(
+                        phase: "patch",
+                        eventCode: InstaReloadEvents.Ev.ResolveFailed,
+                        severity: InstaReloadEvents.SeverityWarn,
+                        target: type != null ? type.FullName : "(null)",
+                        reason: InstaReloadEvents.Reason.ResolveThrew,
+                        detail: $"base chain unresolvable at '{baseName}' ({ex.GetType().Name}); " +
+                                "treated as NOT a HotReloadBehaviour");
                     return false;
                 }
             }
@@ -3324,6 +3344,35 @@ namespace Nimrita.InstaReload.Editor
                 if (!NeedsGenericSubstitution(context, methodReference) &&
                     !NeedsRuntimeRetarget(context, methodReference))
                 {
+                    // THE FALL-THROUGH. This kept the reference bound to the assembly we just
+                    // compiled, and produced three separate bugs on 2026-08-06 - a wrong-typed
+                    // object from newobj, calls reaching the hot copy, and call sites one
+                    // generation stale. It is correct NOW, but only for references that cannot
+                    // have a second copy, so the distinction is recorded rather than assumed.
+                    // A legitimate miss binds to an external assembly (List`1 -> netstandard);
+                    // a miss that binds back into OUR assembly means NeedsRuntimeRetarget failed
+                    // to recognise something of ours, which is a bug and must not be quiet.
+                    if (IsRuntimeAssemblyType(context, methodReference.DeclaringType))
+                    {
+                        // Binds back into OUR assembly, so NeedsRuntimeRetarget failed to recognise
+                        // something of ours. That is a bug, and it gets its own record.
+                        var scope = methodReference.DeclaringType?.Scope?.Name ?? "(unknown)";
+                        InstaReloadEvents.Record(
+                            phase: "patch",
+                            eventCode: InstaReloadEvents.Ev.TokenFallthrough,
+                            severity: InstaReloadEvents.SeverityWarn,
+                            target: methodReference.FullName,
+                            reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                            extraJson: $"\"opcode\":\"{source.OpCode.Name}\",\"scope\":\"{scope}\",\"ours\":true");
+                    }
+                    else
+                    {
+                        // Only one copy of this type can exist, so leaving the reference alone is
+                        // correct. Counted into the reload summary rather than written out - see
+                        // CountExternalFallthrough for why repetition here is actively harmful.
+                        InstaReloadEvents.CountExternalFallthrough();
+                    }
+
                     return Instruction.Create(source.OpCode, module.ImportReference(methodReference));
                 }
 
@@ -3439,14 +3488,34 @@ namespace Nimrita.InstaReload.Editor
             try
             {
                 var definition = field.Resolve();
-                if (definition != null)
+                if (definition == null)
+                {
+                    // Unresolved means UNKNOWN, not "instance" - but the key has to say something,
+                    // so it guesses. A wrong guess flips the static/instance half of the key, the
+                    // lookup misses, and the caller falls through to a hot-assembly reference. That
+                    // is precisely how the 2026-08-06 newobj bug worked, so the guess is on record.
+                    InstaReloadEvents.Record(
+                        phase: "patch",
+                        eventCode: InstaReloadEvents.Ev.ResolveFailed,
+                        severity: InstaReloadEvents.SeverityWarn,
+                        target: $"{typeName}::{field.Name}",
+                        reason: InstaReloadEvents.Reason.MissingRuntimeMethod,
+                        detail: "field definition did not resolve; key assumes instance");
+                }
+                else
                 {
                     isStatic = definition.IsStatic;
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore resolution failures.
+                InstaReloadEvents.Record(
+                    phase: "patch",
+                    eventCode: InstaReloadEvents.Ev.ResolveFailed,
+                    severity: InstaReloadEvents.SeverityWarn,
+                    target: $"{typeName}::{field.Name}",
+                    reason: InstaReloadEvents.Reason.ResolveThrew,
+                    detail: $"{ex.GetType().Name}: {ex.Message}; key assumes instance");
             }
 
             return $"{typeName}::{field.Name}:{fieldType}:{(isStatic ? "static" : "instance")}";

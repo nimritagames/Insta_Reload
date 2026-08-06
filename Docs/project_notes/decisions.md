@@ -628,3 +628,42 @@ Format: date / decision / context / outcome
     mcp-unity rather than handed to Amritanshu as a manual checklist. Anything reachable by "write
     a script, run it, read the console, change it, read again" should be done directly - asking him
     to do it was the wrong call and he said so.
+
+- Date: 2026-08-06
+  Decision: STRUCTURED EVENT SINK - Library/InstaReload/events.jsonl. First step of the standing
+    directive "nothing succeeds silently". Console keeps its one-line-per-reload contract; decisions
+    are recorded as one JSON object per line for querying.
+  WHY A FILE, NOT THE CONSOLE: Unity's console is a ring buffer and it LOST patcher output during
+    this session - lines existed, then did not. It also cannot be joined or counted. A file can.
+  WHY EVERY RECORD CARRIES A RELOAD ID: the suite once reported Boxed`1.BothAxes as patched while
+    the patcher logged "NO instantiation patched" for the same method in the same reload. Both were
+    speaking; nothing tied them together, so the contradiction took manual detective work. Reload id
+    lives on ReloadTimeline, which is already created exactly once per reload - a second counter
+    could drift out of step, which is the bug class being removed. Opened in the constructor on
+    purpose so "records with no reload id" is unrepresentable.
+  WHY REASON CODES, NOT SENTENCES: prose cannot be counted, and breaks when someone improves the
+    wording. Stable codes in InstaReloadEvents.Reason; the sentence goes in `detail`.
+  THREE SILENT SITES FIXED, found by auditing for swallowed exceptions:
+    * GetFieldLookupKey swallowed a Resolve() failure and defaulted isStatic=false - a GUESS that
+      flips half the key, misses the lookup, and falls through to a hot-assembly reference. That is
+      exactly how the newobj bug worked. It still guesses (the key must say something) but the guess
+      is now on record.
+    * TryTrackTokenPair swallowed everything - losing a pair makes later diagnostics blind, so the
+      blindness itself is now visible.
+    * InheritsHotReloadBehaviour returned false on an unresolvable base chain: "could not determine"
+      reported as "determined: no", silently downgrading an entry point.
+  THE INSTRUMENT IMMEDIATELY CAUGHT ITSELF. First run: 94KB for ONE reload, 356 records, 100% benign
+    (33x System.Object::.ctor(), 32x Type::GetTypeFromHandle) - the console-flooding failure that
+    caused a wrong conclusion on 2026-08-05, faithfully rebuilt in a file. Plus 109 records with no
+    reload id at all.
+    FIXED by applying the directive's own escape clause - anything folded into a reported aggregate
+    need not speak individually. Benign external fall-throughs are COUNTED into the reload summary;
+    only a fall-through binding back into OUR assembly gets its own record, because only that one
+    means something is wrong. Unscoped records are now marked `"unscoped":true` so they can never be
+    read as reload #0.
+    RESULT: 94KB -> 495 bytes for the same two reloads, zero orphans, suite still 22/22.
+  A SECOND, INDEPENDENT CONFIRMATION FELL OUT OF IT: across 355 fall-throughs, every single one was
+    external_assembly and ZERO bound back into our assembly. That is the generic retarget fix
+    verified by a different instrument than the suite that drove it.
+  The sink obeys its own rule: a write failure is reported to the console once per session rather
+    than caught and ignored, because a sink that hides its own failure is the bug it exists to stop.

@@ -42,9 +42,31 @@ namespace Nimrita.InstaReload.Editor
         internal ReloadTimeline(string filePath)
         {
             FilePath = filePath;
+            ReloadId = InstaReloadEvents.NextReloadId();
+            Generation = InstaReloadEvents.NextGeneration(filePath);
+
+            // Side effect in a constructor, deliberately: a timeline IS a reload, so opening the
+            // event scope here makes "records exist but carry no reload id" unrepresentable. The
+            // alternative - remembering to call BeginReload at both creation sites - is exactly the
+            // kind of pairing that silently rots.
+            InstaReloadEvents.BeginReload(ReloadId);
         }
 
         internal string FilePath { get; }
+
+        /// <summary>
+        /// Correlation id shared by every structured record from this reload. Lives here because a
+        /// timeline is already created exactly once per reload - a second counter elsewhere could
+        /// drift out of step with this one, which is the class of bug we are trying to remove.
+        /// </summary>
+        internal int ReloadId { get; }
+
+        /// <summary>
+        /// How many times THIS file has been reloaded in this domain, 1-based. The
+        /// one-generation-stale call sites found on 2026-08-06 were only diagnosable because
+        /// generations could be told apart.
+        /// </summary>
+        internal int Generation { get; }
 
         internal bool IsFastPath { get; private set; }
 
