@@ -496,6 +496,20 @@ namespace Nimrita.InstaReload.Editor
                         // cycle now run stale code, so say so rather than letting it be silent.
                         if (compat.RemovedMethodKeys.Count > 0)
                         {
+                            // Structured as well as printed: a marker flip cannot produce a removal,
+                            // so this is one of the four structural events the suite could never
+                            // grade. As prose it was unqueryable; as records it is testable.
+                            foreach (var removedKey in compat.RemovedMethodKeys)
+                            {
+                                InstaReloadEvents.Record(
+                                    phase: "patch",
+                                    eventCode: InstaReloadEvents.Ev.MethodRemoved,
+                                    severity: InstaReloadEvents.SeverityWarn,
+                                    target: removedKey,
+                                    reason: InstaReloadEvents.Reason.RemovedFromSource,
+                                    detail: "running build keeps the old implementation until Play Mode exits");
+                            }
+
                             InstaReloadLogger.LogWarning(
                                 InstaReloadLogCategory.Patcher,
                                 $"{compat.RemovedMethodKeys.Count} method(s) no longer in source — the running build keeps their OLD implementation until you exit Play Mode:");
@@ -1112,6 +1126,16 @@ namespace Nimrita.InstaReload.Editor
                 }
 
                 HotTypeRegistry.Register(fullName, type);
+
+                // Third of the four structural events a marker flip cannot produce. Verbose-only
+                // before, which meant it was invisible at default log level AND ungradeable.
+                InstaReloadEvents.Record(
+                    phase: "patch",
+                    eventCode: InstaReloadEvents.Ev.TypeAdded,
+                    severity: InstaReloadEvents.SeverityInfo,
+                    target: fullName,
+                    reason: InstaReloadEvents.Reason.NewTypeRegistered);
+
                 InstaReloadLogger.LogVerbose($"[Patcher] Registered new type: {fullName}");
 
                 // If the new type is a MonoBehaviour, register its lifecycle entry points
@@ -2062,6 +2086,14 @@ namespace Nimrita.InstaReload.Editor
 
                 if (added.Count > 0)
                 {
+                    InstaReloadEvents.Record(
+                        phase: "patch",
+                        eventCode: InstaReloadEvents.Ev.FieldAdded,
+                        severity: InstaReloadEvents.SeverityInfo,
+                        target: runtimeType.FullName,
+                        reason: InstaReloadEvents.Reason.RoutedToFieldStore,
+                        extraJson: $"\"count\":{added.Count}");
+
                     InstaReloadLogger.Log(InstaReloadLogCategory.Patcher,
                         $"[Patcher] {runtimeType.Name}: {added.Count} new field(s) → HotReloadFieldStore");
                     foreach (var f in added)

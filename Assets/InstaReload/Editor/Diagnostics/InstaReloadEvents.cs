@@ -45,6 +45,10 @@ namespace Nimrita.InstaReload.Editor
             internal const string LookupMiss = "lookup.miss";
             internal const string ResolveFailed = "resolve.failed";
             internal const string TypeChangeIgnored = "type.change_ignored";
+            internal const string MethodRemoved = "method.removed";
+            internal const string MethodAdded = "method.added";
+            internal const string FieldAdded = "field.added";
+            internal const string TypeAdded = "type.added";
             internal const string ReloadSummary = "reload.summary";
             internal const string SuiteResult = "suite.result";
         }
@@ -62,6 +66,10 @@ namespace Nimrita.InstaReload.Editor
             internal const string BaseTypeChanged = "base_type_changed";
             internal const string InterfacesChanged = "interfaces_changed";
             internal const string Exception = "exception";
+            internal const string RemovedFromSource = "removed_from_source";
+            internal const string RoutedToFieldStore = "routed_to_field_store";
+            internal const string NewTypeRegistered = "new_type_registered";
+            internal const string SignatureChanged = "signature_changed";
         }
 
         internal const string SeverityInfo = "info";

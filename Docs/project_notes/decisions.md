@@ -667,3 +667,30 @@ Format: date / decision / context / outcome
     verified by a different instrument than the suite that drove it.
   The sink obeys its own rule: a write failure is reported to the console once per session rather
     than caught and ignored, because a sink that hides its own failure is the bug it exists to stop.
+
+- Date: 2026-08-06
+  Decision: THE LAST SILENT GAP IS CLOSED. Method removal, signature change, new type and new field
+    are gradeable now, via Assets/InstaReload/Tests/StructuralProbe.cs plus structured records.
+  WHY THEY WERE UNGRADEABLE: InstaReloadSuite grades a MARKER FLIP, which only alters a constant
+    inside existing bodies. It can never remove a member or add one, so these four were hand-checked
+    once each - February and August - and never since. Worse, the patcher reported them as console
+    PROSE, and the new-type line was Verbose-only, i.e. invisible at default log level. Nothing could
+    assert on any of it.
+  WHAT CHANGED: each of the four now emits a structured record - method.removed, field.added,
+    type.added, plus the removal record that a signature change produces for the old signature - so
+    a probe can be graded from events.jsonl instead of by reading the console.
+  MEASURED, Play Mode, each variant applied while running:
+    A removal   -> method.removed StructuralProbe::Removable reason=removed_from_source;
+                   [STRUCT] removable=(deleted), old body retained by design
+    B signature -> [STRUCT] sig=23 (was 20), dispatched=2; method.removed for the OLD 1-arg form
+    C new type  -> type.added Nimrita.InstaReload.Tests.AddedType; [STRUCT] type=added, so the new
+                   type is constructible AND callable from a patched body
+    D new field -> field.added reason=routed_to_field_store; [STRUCT] field=0
+  NEW SEMANTIC FOUND BY VARIANT D, and it is worth knowing: a field added during Play Mode reads its
+    DEFAULT, not its initializer, on any instance that already exists. Field initializers run in the
+    constructor and an existing object's constructor does not re-run, so the field routes to
+    HotReloadFieldStore starting at default(T). Objects created after the edit are fine. Not a
+    defect - but completely invisible unless someone looks, which is the whole point of this work.
+  WHY A PROBE RATHER THAN SUITE CASES: a marker flip is reversible and idempotent, so the suite can
+    run it every second forever. These four change the SHAPE of the assembly and cannot be un-applied
+    without another reload, so they are driven deliberately and graded from the event log.
