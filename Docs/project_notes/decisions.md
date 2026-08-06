@@ -694,3 +694,29 @@ Format: date / decision / context / outcome
   WHY A PROBE RATHER THAN SUITE CASES: a marker flip is reversible and idempotent, so the suite can
     run it every second forever. These four change the SHAPE of the assembly and cannot be un-applied
     without another reload, so they are driven deliberately and graded from the event log.
+
+- Date: 2026-08-06
+  Decision: EDIT MODE PATCHING PROBED. Detours DO apply in Edit Mode. Measured, not reasoned about.
+    [EDITPROBE] isPlaying=False before=ORIGINAL after=PATCHED => DETOUR APPLIES IN EDIT MODE
+    [EDITPROBE] hook removed, Target now returns ORIGINAL
+  So the mechanism works and is reversible: an ILHook installs, the new body runs, disposing it
+    restores the original. No play-mode dependency in the detour itself.
+  DELIBERATELY ISOLATED, because "does Edit Mode work" conflates two questions:
+    1. does a detour take effect in Edit Mode      <- this probe, the actual unknown
+    2. can Unity be stopped from recompiling       <- known engineering (kAutoRefreshMode)
+    Testing them together would have made a negative result unattributable. The probe touches no
+    file watcher, no suppression and no compile - it hooks a method directly and asks one question.
+    Target is [MethodImpl(NoInlining)] so "no effect" could not be confused with "the call never
+    happened", which is the ambiguity that cost four commits earlier in this project.
+  WHAT THIS SETTLES: Edit Mode is not blocked by anything in the patching engine. It is blocked by
+    OUR suppression design - a global AssetDatabase.DisallowAutoRefresh + LockReloadAssemblies that
+    only works because Play Mode guarantees an exit. The commercial tool's patcher has ZERO
+    play-mode branching and got Edit Mode for free; ours is play-mode-shaped by choice, not by
+    necessity. Self-inflicted, and now proven so rather than suspected.
+  REMAINING WORK IS PLUMBING AND UX, NOT RESEARCH: swap the global lock for the kAutoRefreshMode
+    preference, own an explicit reconcile path, restore the preference if the tool or Editor dies
+    (their own troubleshooting page tells users to restore it by hand, so this failure is real), and
+    handle editor windows / custom inspectors being recreated on a domain reload. Days, not weeks -
+    but note FastScriptReload has shipped its edit-mode support as EXPERIMENTAL for years, so the
+    long tail is real.
+  Probe kept at Assets/InstaReload/Editor/Diagnostics/EditModeProbe.cs behind two menu items.
